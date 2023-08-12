@@ -1,0 +1,42 @@
+{
+  "name": "benchmark-wasm",
+  "version": "0.1.0",
+  "description": "Benchmark for WebAssembly",
+  "types": "assembly/index.ts",
+  "author": "Jairus Tanaka",
+  "contributors": [],
+  "license": "MIT",
+  "scripts": {
+    "build:bench": "asc assembly/bench.ts -o ./build/bench.wasm --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --runtime incremental",
+    "run:bench": "wasmtime ./build/bench.wasm",
+    "test": "node tests",
+    "start": "npx serve ."
+  },
+  "devDependencies": {
+    "@as-tral/cli": "^2.0.0",
+    "@assemblyscript/wasi-shim": "^0.1.0",
+    "assemblyscript": "^0.27.8",
+    "benchmark": "^2.1.4",
+    "microtime": "^3.1.1",
+    "prettier": "^3.0.1",
+    "tinybench": "^2.5.0",
+    "typescript": "^5.1.6"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JairusSW/benchmark-wasm.git"
+  },
+  "keywords": [],
+  "bugs": {
+    "url": "https://github.com/JairusSW/benchmark-wasm/issues"
+  },
+  "homepage": "https://github.com/JairusSW/benchmark-wasm#readme",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./build/release.js",
+      "types": "./build/release.d.ts"
+    }
+  }
+}
