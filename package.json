@@ -7,7 +7,7 @@
   "contributors": [],
   "license": "MIT",
   "scripts": {
-    "build:bench": "asc assembly/bench.ts -o ./build/bench.wasm --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --runtime incremental",
+    "build:bench": "asc assembly/index.ts -o ./build/bench.wasm --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --runtime incremental",
     "run:bench": "wasmtime ./build/bench.wasm",
     "test": "node tests",
     "start": "npx serve ."
