@@ -49,3 +49,26 @@ export function formatIterations(iterations: i64): string {
     const len = result.length;
     return arr.join(",");
 }
+
+export function numToRuntime(runtime: i32): string {
+    if (runtime == 0) return "stub";
+    if (runtime == 1) return "minimal";
+    if (runtime == 2) return "incremental";
+    return "";
+}
+
+export function freeMemory(): void {
+    if (ASC_RUNTIME == Runtimes.Incremental || ASC_RUNTIME == Runtimes.Minimal) {
+        // @ts-ignore
+        __collect();
+    } else if (ASC_RUNTIME == Runtimes.Stub) {
+        // @ts-ignore
+        __reset();
+    }
+}
+
+export enum Runtimes {
+    Stub,
+    Minimal,
+    Incremental
+}

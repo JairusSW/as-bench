@@ -1,6 +1,5 @@
 import { bench, blackbox } from "./bench";
 
-
 bench("Serialize String", () => {
     blackbox<string>(parseString(blackbox<string>('"st\\"ring\\" w\\"\\"ith quotes\\""')));
 });

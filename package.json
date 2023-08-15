@@ -1,16 +1,20 @@
 {
-  "name": "benchmark-wasm",
-  "version": "0.1.0",
+  "name": "as-bench",
+  "version": "0.0.0-alpha",
   "description": "Benchmark for WebAssembly",
   "types": "assembly/index.ts",
   "author": "Jairus Tanaka",
   "contributors": [],
   "license": "MIT",
   "scripts": {
-    "build:bench": "asc assembly/index.ts -o ./build/bench.wasm --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --runtime incremental",
-    "run:bench": "wasmtime ./build/bench.wasm",
-    "test": "node tests",
-    "start": "npx serve ."
+    "build:bench": "asc assembly/index.ts -o ./build/bench.wasm --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --runtime stub",
+    "run:wasmtime": "wasmtime ./build/bench.wasm",
+    "run:wavm": "wavm run ./build/bench.wasm",
+    "run:wasmi": "wasmi_cli ./build/bench.wasm",
+    "run:wasm3": "./bin/wasm3.com ./build/bench.wasm",
+    "run:wazero": "./bin/wazero run ./build/bench.wasm",
+    "run:node": "node index.js",
+    "run:lunatic": "lunatic ./build/bench.wasm"
   },
   "devDependencies": {
     "@as-tral/cli": "^2.0.0",
@@ -32,11 +36,5 @@
     "url": "https://github.com/JairusSW/benchmark-wasm/issues"
   },
   "homepage": "https://github.com/JairusSW/benchmark-wasm#readme",
-  "type": "module",
-  "exports": {
-    ".": {
-      "import": "./build/release.js",
-      "types": "./build/release.d.ts"
-    }
-  }
+  "type": "module"
 }
