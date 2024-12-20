@@ -1,4 +1,12 @@
-// Adapted from https://github.com/romdotdog/as-tral/src/as-tral.ts
+export function computeGrowthFactor(len: u64): u64 {
+    return len * (1 << (2 - ((log2(len - 8) - 8) >>> 4)));
+}
+
+export function log2(value: u64): u64 {
+    if (value == 0) return 0;
+    return 63 - clz<u64>(value);
+}
+
 export function formatTime(ms: f64): string {
     if (ms < 10e-6) {
         return short<f64>(ms * 1e9).toString() + "ps";
@@ -39,36 +47,4 @@ function short<T extends number>(n: T): T {
             return Math.round(n) as T;
         }
     }
-}
-
-export function formatIterations(iterations: i64): string {
-    console.log("iterations: " + iterations.toString())
-    let result = iterations.toString();
-    const arr: string[] = [];
-    // 12345
-    const len = result.length;
-    return arr.join(",");
-}
-
-export function numToRuntime(runtime: i32): string {
-    if (runtime == 0) return "stub";
-    if (runtime == 1) return "minimal";
-    if (runtime == 2) return "incremental";
-    return "";
-}
-
-export function freeMemory(): void {
-    if (ASC_RUNTIME == Runtimes.Incremental || ASC_RUNTIME == Runtimes.Minimal) {
-        // @ts-ignore
-        __collect();
-    } else if (ASC_RUNTIME == Runtimes.Stub) {
-        // @ts-ignore
-        __reset();
-    }
-}
-
-export enum Runtimes {
-    Stub,
-    Minimal,
-    Incremental
 }
