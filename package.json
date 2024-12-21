@@ -10,7 +10,7 @@
     "test": "ast test && rm -rf ./build/",
     "pretest": "rm -rf ./build/ && ast build",
     "build:bench": "rm -rf ./build/ && asc assembly/__benches__/misc.bench.ts -o ./build/bench.wasm --textFile ./build/bench.wat --optimizeLevel 3 --shrinkLevel 0 --converge --noAssert --uncheckedBehavior always --enable gc --enable simd",
-    "build:test": "rm -rf ./build/ && JSON_DEBUG=true asc assembly/test.ts -o ./build/test.wasm --textFile ./build/test.wat -O3 --enable simd",
+    "build:test": "rm -rf ./build/ && JSON_DEBUG=true asc assembly/test.bench.ts -o ./build/test.wasm --textFile ./build/test.wat -O3 --enable simd",
     "build:transform": "tsc -p ./transform",
     "test:wasmtime": "wasmtime ./build/test.wasm",
     "test:wasmer": "wasmer ./build/test.wasm",
@@ -27,7 +27,9 @@
     "tinybench": "^2.8.0",
     "typescript": "^5.5.4"
   },
-  "dependencies": {},
+  "dependencies": {
+    "as-rainbow": "^0.1.0"
+  },
   "overrides": {
     "assemblyscript": "$assemblyscript"
   },
