@@ -7,7 +7,23 @@
     "url": "git+https://github.com/JairusSW/as-bench.git"
   },
   "funding": "https://github.com/sponsors/JairusSW",
-  "main": "transform/lib/index.js",
+  "type": "module",
+  "bin": {
+    "as-bench": "./bin/index.js",
+    "asb": "./bin/index.js"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./lib": "./lib/build/as-bs.js",
+    "./transform": "./transform/lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "types": "assembly/index.ts",
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "glob": "^13.0.6",
+    "wipc-js": "^0.1.1"
+  },
   "devDependencies": {
     "@assemblyscript/wasi-shim": "^0.1.0",
     "@eslint/js": "^10.0.1",
@@ -28,28 +44,48 @@
   "homepage": "https://docs.jairus.dev/as-bench",
   "files": [
     "assembly/index.ts",
-    "assembly/index.d.ts",
+    "assembly/engine.ts",
     "assembly/types.ts",
+    "assembly/util/**/*.ts",
     "assembly/tsconfig.json",
     "lib/as-bs.ts",
-    "transform/lib/",
+    "lib/build/**/*.js",
+    "lib/build/**/*.d.ts",
+    "bin/**/*.js",
+    "transform/lib/**/*.js",
     "transform/package.json",
     "index.ts",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
-  "keywords": ["assemblyscript"],
+  "keywords": [
+    "assemblyscript",
+    "benchmark",
+    "benchmarking",
+    "criterion",
+    "statistics"
+  ],
   "license": "MIT",
   "publishConfig": {
     "@JairusSW:registry": "https://npm.pkg.github.com"
   },
   "scripts": {
+    "build": "npm run build:cli && npm run build:lib && npm run build:transform",
+    "build:cli": "rm -rf ./bin/ && tsc -p cli && prettier -w ./bin/ && chmod +x ./bin/index.js",
+    "build:lib": "rm -rf ./lib/build && tsc -p ./tsconfig.lib.json",
+    "build:transform": "rm -rf ./transform/lib && tsc -p ./transform && prettier -w ./transform/lib/",
+    "build:playground": "npm run build:transform && asc assembly/playground.ts --transform ./transform/lib/index.js -o ./build/playground.wasm --textFile ./build/playground.wat --config ./node_modules/@assemblyscript/wasi-shim/asconfig.json",
+    "build:pg": "npm run build:playground",
+    "run:playground": "AS_BENCH_RUNTIME_TARGET=wasi node --no-warnings ./scripts/playground.mjs ./build/playground.wasm",
+    "run:pg": "npm run run:playground",
+    "playground": "npm run build:playground && npm run run:playground",
+    "play": "npm run playground",
+    "pg": "npm run playground",
+    "typecheck": "tsc -p cli --noEmit && tsc -p tsconfig.lib.json --noEmit && tsc -p transform --noEmit",
     "format": "prettier -w .",
     "lint": "eslint . --no-warn-ignored",
     "lint:fix": "eslint . --fix --no-warn-ignored",
     "check": "npm run typecheck && npm run lint"
-  },
-  "type": "module",
-  "types": "assembly/index.ts"
+  }
 }

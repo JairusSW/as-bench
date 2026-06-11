@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ES2020",
+    "moduleResolution": "Bundler",
+    "rootDir": "./lib",
+    "outDir": "./lib/build",
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "removeComments": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["./lib/**/*.ts"],
+  "exclude": ["./lib/build"]
+}
