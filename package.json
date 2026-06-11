@@ -57,7 +57,9 @@
     "index.ts",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE",
+    "licenses/"
   ],
   "keywords": [
     "assemblyscript",

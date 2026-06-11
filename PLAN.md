@@ -96,8 +96,13 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
 ## Attribution
 
 - `as-tral` is romdotdog's, **Apache-2.0** — vendored into `assembly/engine.ts`
-  with an SPDX header + attribution (one-way compatible into this MIT project;
-  that file stays Apache-2.0). Port fixes as-tral's resample-median bug.
+  with an SPDX header + attribution; full license text in
+  `licenses/as-tral.LICENSE`, credited in `NOTICE` (one-way compatible into
+  this MIT project; that file stays Apache-2.0). Port fixes as-tral's
+  resample-median bug.
+- Timing source: WASI builds use the wasi-shim's `performance.now()`
+  (`clock_time_get(MONOTONIC)`, ns-sourced) — no JS import on the hot path and
+  ready for pure-CLI runtimes; `__asbench.now` is the non-WASI fallback.
 - `replay/` is Jairus's own MIT playground code — clean to vendor.
 
 ## Open curiosities

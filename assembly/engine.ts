@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Statistics engine, ported from as-tral (https://github.com/romdotdog/as-tral,
-// Copyright © romdotdog, Apache License 2.0), itself a port of Criterion.rs's
+// Copyright © romdotdog, Apache License 2.0 — full text in
+// licenses/as-tral.LICENSE; see also NOTICE), itself a port of Criterion.rs's
 // analysis pipeline (https://github.com/bheisler/criterion.rs). Changes from
 // as-tral: settings are runtime values (host-tunable via `tune`) instead of
 // transform-injected compile-time globals, buffers are (re)allocated lazily to
@@ -11,6 +12,20 @@
 
 import * as host from "./util/host";
 import { Settings, SamplingMode } from "./types";
+
+// Timing source. Under a WASI build (wasi-shim sets ASC_WASI) the shim's
+// performance.now() — clock_time_get(MONOTONIC), ns-sourced, in ms — keeps
+// timing inside the wasm/runtime with no JS host import on the hot path, and
+// works under pure-CLI runtimes (wasmtime, wasmer) that can't supply
+// __asbench.now. Elsewhere, fall back to the host import.
+// @ts-ignore: decorator
+@inline
+function timeNow(): f64 {
+  if (isDefined(ASC_WASI)) {
+    return performance.now();
+  }
+  return host.now();
+}
 
 /** Live settings; benchmark files mutate fields before their first `bench()`. */
 export const settings = new Settings();
@@ -293,14 +308,14 @@ export function runBench(name: string, routine: () => void): void {
 
   host.warmupStarted(cfgWarmupTime);
   while (true) {
-    let start = host.now();
+    let start = timeNow();
 
     for (let i: u64 = 0; i < warmupIters; ++i) {
       routine();
     }
 
     totalWarmupIters += warmupIters;
-    warmupElapsedTime += host.now() - start;
+    warmupElapsedTime += timeNow() - start;
     if (warmupElapsedTime > cfgWarmupTime) {
       break;
     }
@@ -330,14 +345,14 @@ export function runBench(name: string, routine: () => void): void {
   // sample collection
   let notWarned = true;
   for (let i = 0; i < cfgSampleSize; ++i) {
-    let start = host.now();
+    let start = timeNow();
 
     const iters = mIters[i];
     for (let j: u64 = 0; j < iters; ++j) {
       routine();
     }
 
-    const res = host.now() - start;
+    const res = timeNow() - start;
     if (res == 0 && notWarned) {
       host.faultyBenchmark();
       notWarned = false;

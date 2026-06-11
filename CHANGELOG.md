@@ -5,6 +5,8 @@
 - `__asbench` host-import namespace in `lib/as-bs.ts`: `now`, `tune` (settings overrides), progress/result events; `runBenchFile()` runs a compiled bench under WASI with a pluggable reporter.
 - `as-bench run` / `as-bench build` implemented: glob → asc (in-process, wasi-shim + transform) → run → criterion-style render; flags `--warmup --measure --samples --resamples --sampling --confidence --verbose`.
 - Playground now runs the real engine.
+- WASI builds time via the shim's `performance.now()` (`clock_time_get(MONOTONIC)`) instead of the `__asbench.now` JS import — no host import on the hot path; `__asbench.now` remains the fallback for non-WASI targets.
+- Proper Apache-2.0 vendoring for the engine: full license text in `licenses/as-tral.LICENSE` + `NOTICE` crediting romdotdog/as-tral and Criterion.rs; both ship in the npm package.
 
 - Scaffold the three build targets (`cli/`→`bin/`, `lib/`→`lib/build/`, `transform/src/`→`transform/lib/`) mirroring as-test.
 - Thin runtime-agnostic host (`lib/as-bs.ts`): `instantiate()` for node bindings + WASI, live `now()`, default imports.

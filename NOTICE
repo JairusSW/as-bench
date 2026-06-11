@@ -1,0 +1,16 @@
+as-bench
+Copyright (c) Jairus Tanaka
+
+This product includes software developed by third parties:
+
+- assembly/engine.ts is derived from as-tral
+  (https://github.com/romdotdog/as-tral), Copyright (c) romdotdog,
+  licensed under the Apache License, Version 2.0.
+  A copy of that license is provided at licenses/as-tral.LICENSE.
+
+- as-tral is itself a port of the Criterion.rs analysis pipeline
+  (https://github.com/bheisler/criterion.rs), Copyright (c) Brook Heisler,
+  dual-licensed under Apache-2.0 OR MIT.
+
+All other code in this repository is licensed under the MIT license (see
+LICENSE).
