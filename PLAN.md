@@ -105,9 +105,24 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
   ready for pure-CLI runtimes; `__asbench.now` is the non-WASI fallback.
 - `replay/` is Jairus's own MIT playground code — clean to vendor.
 
-## Open curiosities
+## Resolved: the "--optimize 2× slower" anomaly (2026-06-11)
 
-- The CLI's `--optimize` build measured `fib(20)` ≈ 2× slower than the
-  playground's unoptimized build (36µs vs 19µs) on the same machine.
-  Investigate before trusting cross-build comparisons.
+Reproduced standalone (no engine involved) — as-bench measures correctly.
+The cause is **V8 execution-tier steady states**, not the wasm: with a pinned
+tier (`--liftoff-only`) O0 and O3 builds run identically (69µs), but under
+default tiering, `-O2`/`-O3` (shrinkLevel 0 — which is what `asc --optimize`
+emits) builds settle into a stable partial-tier equilibrium ~2× slower
+(38µs) than what O0/O1/shrink≥1 builds reach (19–22µs, full TurboFan +
+feedback inlining). The slow state is *stable* — adaptive warmup converges on
+it with tight CIs — it's just not peak. Affects call-heavy and loop-heavy code
+alike (fib AND bubble sort, both ~2.1×).
+
+Consequences:
+- Wall-clock numbers under node/V8 are a property of (asc flags × V8 tier
+  heuristics), not of the wasm alone. Document loudly.
+- Strengthens the case for the roadmap's tier-free modes: wasmtime/AOT
+  runtimes (step 5) and instruction-count profiling (step 4) are the
+  tier-independent ground truth.
+- Keep `--optimize` as the build default (it's what users ship), but make
+  build flags configurable so flag-sensitivity is testable.
 </content>
