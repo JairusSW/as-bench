@@ -12,7 +12,8 @@ export declare function now(): f64;
  * Settings override hook. Called once per setting at each bench start with the
  * in-wasm value; the host returns either an override (CLI flag) or the value
  * unchanged. Kinds: 0 warmupTime, 1 measurementTime, 2 sampleSize,
- * 3 numResamples, 4 samplingMode, 5 confidenceLevel.
+ * 3 numResamples, 4 samplingMode, 5 confidenceLevel, 6 warmupTolerance,
+ * 7 warmupMinTime.
  */
 // @ts-ignore: decorator
 @external("__asbench", "tune")
@@ -25,6 +26,11 @@ export declare function benchStart(ptr: usize, len: i32): void;
 // @ts-ignore: decorator
 @external("__asbench", "warmupStarted")
 export declare function warmupStarted(durationMs: f64): void;
+
+/** Warmup finished; converged=1 when met stabilized before the time cap. */
+// @ts-ignore: decorator
+@external("__asbench", "warmupEnded")
+export declare function warmupEnded(elapsedMs: f64, met: f64, converged: i32): void;
 
 // @ts-ignore: decorator
 @external("__asbench", "measureStarted")

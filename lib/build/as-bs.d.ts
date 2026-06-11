@@ -14,10 +14,13 @@ export interface TuneOverrides {
     numResamples?: number;
     samplingMode?: number;
     confidenceLevel?: number;
+    warmupTolerance?: number;
+    warmupMinTime?: number;
 }
 export interface BenchReporter {
     benchStart?(name: string): void;
     warmupStarted?(durationMs: number): void;
+    warmupEnded?(elapsedMs: number, met: number, converged: boolean): void;
     measureStarted?(estimatedMs: number, totalIters: number, sampleCount: number): void;
     analyzing?(): void;
     faultyConfig?(linear: boolean, actualMs: number, recommendedSamples: number): void;

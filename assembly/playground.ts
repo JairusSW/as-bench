@@ -8,6 +8,7 @@ import { bench, suite, blackbox, settings } from "./index";
 // Keep the playground loop snappy; bump these to criterion defaults for real
 // numbers (3000 / 5000 / 100000).
 settings.warmupTime = 100;
+settings.warmupMinTime = 25;
 settings.measurementTime = 250;
 settings.numResamples = 10000;
 

@@ -7,6 +7,7 @@
 - Playground now runs the real engine.
 - WASI builds time via the shim's `performance.now()` (`clock_time_get(MONOTONIC)`) instead of the `__asbench.now` JS import — no host import on the hot path; `__asbench.now` remains the fallback for non-WASI targets.
 - Proper Apache-2.0 vendoring for the engine: full license text in `licenses/as-tral.LICENSE` + `NOTICE` crediting romdotdog/as-tral and Criterion.rs; both ship in the npm package.
+- Adaptive warmup: exits early once per-batch met stabilizes (2 consecutive batches within `warmupTolerance`, default 2%, after `warmupMinTime`); `warmupTime` is now a cap and `--warmup-tolerance 0` restores fixed-time warmup. Converged warmups derive met from the stable tail, not the cold-biased cumulative average. New `warmupEnded` event + `--warmup-tolerance`/`--warmup-min` flags. Example bench: 17.1s → 8.7s, identical results.
 
 - Scaffold the three build targets (`cli/`→`bin/`, `lib/`→`lib/build/`, `transform/src/`→`transform/lib/`) mirroring as-test.
 - Thin runtime-agnostic host (`lib/as-bs.ts`): `instantiate()` for node bindings + WASI, live `now()`, default imports.

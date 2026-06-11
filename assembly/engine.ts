@@ -296,15 +296,30 @@ export function runBench(name: string, routine: () => void): void {
   const numResamples = <i32>host.tune(3, <f64>settings.numResamples);
   cfgSamplingMode = <i32>host.tune(4, <f64>(settings.samplingMode as i32));
   cfgConfidenceLevel = host.tune(5, settings.confidenceLevel);
+  const warmupTolerance = host.tune(6, settings.warmupTolerance);
+  const warmupMinTime = host.tune(7, settings.warmupMinTime);
   cfgSampleSize = sampleSize;
   cfgNumResamples = numResamples;
   ensureBuffers(sampleSize, numResamples);
 
-  // warmup
-  // https://github.com/bheisler/criterion.rs/blob/ceade3b1d72c3ecef0896cbe0dee12f43a6ce240/src/routine.rs#L216
+  // warmup — adaptive on top of criterion's doubling loop
+  // (https://github.com/bheisler/criterion.rs/blob/ceade3b1d72c3ecef0896cbe0dee12f43a6ce240/src/routine.rs#L216):
+  // once past warmupMinTime, if consecutive batch mets agree within
+  // warmupTolerance for STABLE_BATCHES batches, exit early as "converged".
+  // warmupTime is the cap either way; tolerance 0 restores fixed-time warmup.
+  // Stability is only judged on batches >= MIN_JUDGE_BATCH_MS so timer
+  // quantization can't fake (or hide) convergence.
+  const STABLE_BATCHES = 2;
+  const MIN_JUDGE_BATCH_MS: f64 = 5.0;
+
   let warmupIters: u64 = 1;
   let totalWarmupIters: u64 = 0;
   let warmupElapsedTime: f64 = 0;
+  let prevBatchMet: f64 = 0;
+  let stableBatches = 0;
+  let stableElapsed: f64 = 0;
+  let stableIters: u64 = 0;
+  let converged = false;
 
   host.warmupStarted(cfgWarmupTime);
   while (true) {
@@ -314,8 +329,29 @@ export function runBench(name: string, routine: () => void): void {
       routine();
     }
 
+    const batchElapsed = timeNow() - start;
     totalWarmupIters += warmupIters;
-    warmupElapsedTime += timeNow() - start;
+    warmupElapsedTime += batchElapsed;
+
+    const batchMet = batchElapsed / (warmupIters as f64);
+    if (warmupTolerance > 0 && prevBatchMet > 0 && warmupElapsedTime >= warmupMinTime && batchElapsed >= MIN_JUDGE_BATCH_MS) {
+      const drift = abs(batchMet - prevBatchMet) / prevBatchMet;
+      if (drift <= warmupTolerance) {
+        stableBatches++;
+        stableElapsed += batchElapsed;
+        stableIters += warmupIters;
+        if (stableBatches >= STABLE_BATCHES) {
+          converged = true;
+          break;
+        }
+      } else {
+        stableBatches = 0;
+        stableElapsed = 0;
+        stableIters = 0;
+      }
+    }
+    prevBatchMet = batchMet;
+
     if (warmupElapsedTime > cfgWarmupTime) {
       break;
     }
@@ -323,8 +359,11 @@ export function runBench(name: string, routine: () => void): void {
     warmupIters *= 2;
   }
 
-  // mean execution time per iteration, the basis of the sampling plan
-  const met = warmupElapsedTime / (totalWarmupIters as f64);
+  // mean execution time per iteration, the basis of the sampling plan. A
+  // converged warmup estimates it from the stable tail only — the cumulative
+  // average includes the cold first batches and biases the plan upward.
+  const met = converged && stableIters > 0 ? stableElapsed / (stableIters as f64) : warmupElapsedTime / (totalWarmupIters as f64);
+  host.warmupEnded(warmupElapsedTime, met, converged ? 1 : 0);
   const useFlatSampling = cfgSamplingMode == <i32>SamplingMode.Auto ? Sampling.chooseSamplingMode(met) : cfgSamplingMode == <i32>SamplingMode.Flat;
 
   if (useFlatSampling) {

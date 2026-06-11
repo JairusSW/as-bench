@@ -28,20 +28,24 @@ export enum EstimateKind {
  * Index order matches the engine's tune kinds.
  */
 export interface TuneOverrides {
-  warmupTime?: number;
+  warmupTime?: number; // cap; adaptive warmup may exit earlier
   measurementTime?: number;
   sampleSize?: number;
   numResamples?: number;
   samplingMode?: number; // 0 auto, 1 linear, 2 flat
   confidenceLevel?: number;
+  warmupTolerance?: number; // relative met drift considered stable; 0 = fixed-time warmup
+  warmupMinTime?: number; // never judge stability before this many ms
 }
 
-const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel"];
+const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime"];
 
 /** Engine progress/result events. All optional; times are in milliseconds. */
 export interface BenchReporter {
   benchStart?(name: string): void;
   warmupStarted?(durationMs: number): void;
+  /** converged=true when met stabilized before the warmupTime cap. */
+  warmupEnded?(elapsedMs: number, met: number, converged: boolean): void;
   measureStarted?(estimatedMs: number, totalIters: number, sampleCount: number): void;
   analyzing?(): void;
   faultyConfig?(linear: boolean, actualMs: number, recommendedSamples: number): void;
@@ -91,6 +95,7 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
     },
     benchStart: (ptr: number, len: number) => reporter.benchStart?.(readString(getMem(), ptr, len)),
     warmupStarted: (ms: number) => reporter.warmupStarted?.(ms),
+    warmupEnded: (elapsed: number, met: number, converged: number) => reporter.warmupEnded?.(elapsed, met, converged !== 0),
     measureStarted: (est: number, iters: number, samples: number) => reporter.measureStarted?.(est, iters, samples),
     analyzing: () => reporter.analyzing?.(),
     faultyConfig: (linear: number, actualMs: number, rec: number) => reporter.faultyConfig?.(linear !== 0, actualMs, rec),

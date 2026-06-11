@@ -34,6 +34,8 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--warmup") tunes.warmupTime = num(a, args[++i]);
+    else if (a === "--warmup-tolerance") tunes.warmupTolerance = num(a, args[++i]);
+    else if (a === "--warmup-min") tunes.warmupMinTime = num(a, args[++i]);
     else if (a === "--measure") tunes.measurementTime = num(a, args[++i]);
     else if (a === "--samples") tunes.sampleSize = num(a, args[++i]);
     else if (a === "--resamples") tunes.numResamples = num(a, args[++i]);
@@ -156,7 +158,14 @@ export class Renderer implements BenchReporter {
   }
 
   warmupStarted(ms: number): void {
-    this.status(`Benchmarking ${this.label()}: warming up for ${formatTime(ms)}`);
+    this.status(`Benchmarking ${this.label()}: warming up (cap ${formatTime(ms)})`);
+  }
+
+  warmupEnded(elapsedMs: number, met: number, converged: boolean): void {
+    if (!this.verbose) return;
+    this.clearStatus();
+    const how = converged ? "converged" : "hit cap";
+    console.log(chalk.dim(`  warmup   ${formatTime(elapsedMs)} (${how}, met ${formatTime(met)})`));
   }
 
   measureStarted(estimatedMs: number, totalIters: number, samples: number): void {

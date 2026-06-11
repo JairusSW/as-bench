@@ -13,7 +13,9 @@ ${chalk.bold("Usage")}
 
 ${chalk.bold("Commands")}
   run                 Build and run benchmarks (statistical timing)
-    --warmup <ms>       Override warmup time
+    --warmup <ms>       Override warmup time cap
+    --warmup-tolerance <x>  Stable-met drift for early warmup exit (0 = fixed-time)
+    --warmup-min <ms>   Earliest the warmup may converge
     --measure <ms>      Override measurement time
     --samples <n>       Override sample count
     --resamples <n>     Override bootstrap resamples
