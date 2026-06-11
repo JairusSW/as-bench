@@ -78,11 +78,15 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
 
 ## Roadmap
 
-1. **Scaffold the 3 targets** (cli→bin, lib→lib/build, transform→transform/lib)
-   mirroring as-test's package.json + tsconfigs. ← _in progress_
-2. **Port the stats engine** from `as-tral/assembly/main.ts` into
-   `assembly/engine.ts`; wrap in `bench()`/`suite()`/`set()`/`blackbox()`; ship
-   results over WIPC. → first working `as-bench run`.
+1. ~~**Scaffold the 3 targets**~~ — done.
+2. ~~**Port the stats engine**~~ — done. `assembly/engine.ts` (Apache-2.0
+   attributed) + `bench()`/`suite()`/`blackbox()` + mutable `settings`;
+   results flow over the `__asbench` host-import namespace (string names as
+   UTF-16 ptr/len) rather than WIPC for now — WIPC becomes the transport when
+   the runtime matrix lands (step 5), since pure-CLI runtimes (wasmtime) can't
+   supply rich imports. CLI `run`/`build` work end-to-end with criterion-style
+   rendering and `--warmup/--measure/--samples/--resamples/--sampling/
+   --confidence/--verbose` overrides via the engine's `tune` import.
 3. **Port `replay/`** verbatim; wire into `lib/as-bs.ts` as deterministic mode;
    add the passthrough exclude-set + auto-rewind; de-risk heap-drift.
 4. **Transform instrumentation pass** (Binaryen) → `profile --heaviest=instr`.
@@ -91,6 +95,14 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
 
 ## Attribution
 
-- `as-tral` is romdotdog's (verify MIT-compatible before vendoring the engine).
+- `as-tral` is romdotdog's, **Apache-2.0** — vendored into `assembly/engine.ts`
+  with an SPDX header + attribution (one-way compatible into this MIT project;
+  that file stays Apache-2.0). Port fixes as-tral's resample-median bug.
 - `replay/` is Jairus's own MIT playground code — clean to vendor.
+
+## Open curiosities
+
+- The CLI's `--optimize` build measured `fib(20)` ≈ 2× slower than the
+  playground's unoptimized build (36µs vs 19µs) on the same machine.
+  Investigate before trusting cross-build comparisons.
 </content>

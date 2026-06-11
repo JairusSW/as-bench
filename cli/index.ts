@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import chalk from "chalk";
+import { executeRun, executeBuild } from "./run.js";
 
 // Bumped in lockstep with package.json; the scaffold keeps it inline rather
 // than importing JSON to avoid ESM import-assertion friction in the bin.
@@ -8,31 +9,36 @@ const VERSION = "0.0.0";
 const HELP = `${chalk.bold("as-bench")} — runtime-agnostic, statistically-aware benchmarking for AssemblyScript
 
 ${chalk.bold("Usage")}
-  as-bench <command> [options]
+  as-bench <command> [files...] [options]
 
 ${chalk.bold("Commands")}
   run                 Build and run benchmarks (statistical timing)
-    --deterministic   Record host imports once, replay each measured iteration
-    --baseline <id>   Compare against a saved baseline
-    --save-baseline   Persist this run as a baseline
-  profile             Count work per call
-    --heaviest=instr  Rank calls by wasm instruction count (default)
-    --heaviest=time   Rank calls by per-function wall-clock (higher overhead)
+    --warmup <ms>       Override warmup time
+    --measure <ms>      Override measurement time
+    --samples <n>       Override sample count
+    --resamples <n>     Override bootstrap resamples
+    --sampling <m>      auto | linear | flat
+    --confidence <x>    Confidence level (default 0.95)
+    --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
-  init                Scaffold an as-bench config in the current project
+  profile             Count work per call (not yet implemented)
+    --heaviest=instr    Rank calls by wasm instruction count (default)
+    --heaviest=time     Rank calls by per-function wall-clock
+  init                Scaffold an as-bench config (not yet implemented)
 
   help, --help, -h    Show this help
   version, -v         Show the version
 
-${chalk.dim("Scaffold stage — only help/version are wired up so far.")}`;
+Benchmark files default to ${chalk.dim("assembly/__benches__/**/*.ts")}.`;
 
 function notImplemented(cmd: string): void {
-  console.log(chalk.yellow(`as-bench ${cmd}: not yet implemented (scaffold)`));
+  console.log(chalk.yellow(`as-bench ${cmd}: not yet implemented`));
   process.exitCode = 1;
 }
 
-function main(argv: string[]): void {
+async function main(argv: string[]): Promise<void> {
   const cmd = argv[0];
+  const rest = argv.slice(1);
   switch (cmd) {
     case undefined:
     case "help":
@@ -46,8 +52,12 @@ function main(argv: string[]): void {
       console.log(VERSION);
       return;
     case "run":
-    case "profile":
+      await executeRun(rest);
+      return;
     case "build":
+      await executeBuild(rest);
+      return;
+    case "profile":
     case "init":
       notImplemented(cmd);
       return;
@@ -58,4 +68,7 @@ function main(argv: string[]): void {
   }
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((err) => {
+  console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+  process.exitCode = 1;
+});

@@ -1,11 +1,8 @@
-// Thin, runtime-agnostic JS host for as-bench. A runner imports `instantiate`
-// from `as-bench/lib`, hands it an import object, and gets back a started
-// instance — the same wasm runs unchanged under node bindings, WASI, etc. The
-// statistics engine lives inside the wasm; this layer only supplies timing,
-// the data/IO channel, and (later) the record/replay glue.
-//
-// Scaffold stage: bindings + WASI instantiation and a live `now()`. WIPC and
-// replay wiring land in steps 2–3.
+// Thin, runtime-agnostic JS host for as-bench. A runner imports `runBenchFile`
+// (or the lower-level pieces) from `as-bench/lib`, and the same wasm runs
+// unchanged under node bindings, WASI, etc. The statistics engine lives inside
+// the wasm; this layer only supplies timing (`now`), settings overrides
+// (`tune`), and the reporting channel — plus, later, the record/replay glue.
 
 import fs from "node:fs";
 
@@ -15,6 +12,125 @@ export type RuntimeTarget = "bindings" | "wasi";
 export function now(): number {
   return performance.now();
 }
+
+/** Estimate kinds emitted by the engine's `estimate` callback. */
+export enum EstimateKind {
+  Mean = 0,
+  Median = 1,
+  StdDev = 2,
+  MAD = 3,
+  Slope = 4,
+}
+
+/**
+ * Host-side settings overrides, applied via the engine's `tune` import. Keys
+ * left undefined fall through to the values set in the benchmark file.
+ * Index order matches the engine's tune kinds.
+ */
+export interface TuneOverrides {
+  warmupTime?: number;
+  measurementTime?: number;
+  sampleSize?: number;
+  numResamples?: number;
+  samplingMode?: number; // 0 auto, 1 linear, 2 flat
+  confidenceLevel?: number;
+}
+
+const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel"];
+
+/** Engine progress/result events. All optional; times are in milliseconds. */
+export interface BenchReporter {
+  benchStart?(name: string): void;
+  warmupStarted?(durationMs: number): void;
+  measureStarted?(estimatedMs: number, totalIters: number, sampleCount: number): void;
+  analyzing?(): void;
+  faultyConfig?(linear: boolean, actualMs: number, recommendedSamples: number): void;
+  faultyBenchmark?(): void;
+  estimate?(kind: EstimateKind, lb: number, point: number, hb: number): void;
+  /** Headline time: slope under linear sampling, mean under flat. */
+  result?(lb: number, point: number, hb: number): void;
+  outliers?(los: number, lom: number, him: number, his: number): void;
+  benchEnd?(): void;
+  suiteStart?(name: string): void;
+  /** Delta vs the suite's first bench: ratios (-0.38 = 38% faster). */
+  suiteChange?(lb: number, point: number, hb: number, pValue: number): void;
+  suiteEnd?(): void;
+}
+
+// node:wasi prints an ExperimentalWarning on first import; not actionable for
+// bench users, so filter that one warning while letting others through.
+let wasiWarningFiltered = false;
+function filterWasiWarning(): void {
+  if (wasiWarningFiltered) return;
+  wasiWarningFiltered = true;
+  const original = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    if (String(warning instanceof Error ? warning.message : warning).includes("WASI")) return;
+    (original as (w: string | Error, ...rest: unknown[]) => void)(warning, ...args);
+  }) as typeof process.emitWarning;
+}
+
+const utf16 = new TextDecoder("utf-16le");
+
+function readString(memory: WebAssembly.Memory, ptr: number, len: number): string {
+  return utf16.decode(new Uint8Array(memory.buffer, ptr, len * 2));
+}
+
+/**
+ * Build the `__asbench` import namespace the engine links against. `getMem` is
+ * a thunk resolved at call time (the instance doesn't exist yet when imports
+ * are constructed, and `memory.buffer` detaches on grow).
+ */
+export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}): WebAssembly.ModuleImports {
+  return {
+    now,
+    tune(kind: number, value: number): number {
+      const key = TUNE_KEYS[kind];
+      const override = key === undefined ? undefined : tunes[key];
+      return override === undefined ? value : override;
+    },
+    benchStart: (ptr: number, len: number) => reporter.benchStart?.(readString(getMem(), ptr, len)),
+    warmupStarted: (ms: number) => reporter.warmupStarted?.(ms),
+    measureStarted: (est: number, iters: number, samples: number) => reporter.measureStarted?.(est, iters, samples),
+    analyzing: () => reporter.analyzing?.(),
+    faultyConfig: (linear: number, actualMs: number, rec: number) => reporter.faultyConfig?.(linear !== 0, actualMs, rec),
+    faultyBenchmark: () => reporter.faultyBenchmark?.(),
+    estimate: (kind: number, lb: number, point: number, hb: number) => reporter.estimate?.(kind, lb, point, hb),
+    result: (lb: number, point: number, hb: number) => reporter.result?.(lb, point, hb),
+    outliers: (los: number, lom: number, him: number, his: number) => reporter.outliers?.(los, lom, him, his),
+    benchEnd: () => reporter.benchEnd?.(),
+    suiteStart: (ptr: number, len: number) => reporter.suiteStart?.(readString(getMem(), ptr, len)),
+    suiteChange: (lb: number, point: number, hb: number, p: number) => reporter.suiteChange?.(lb, point, hb, p),
+    suiteEnd: () => reporter.suiteEnd?.(),
+  };
+}
+
+/**
+ * Run a compiled benchmark module (built against the wasi-shim) to completion:
+ * instantiate with WASI + `__asbench`, then `_start` executes the bench file's
+ * top-level code, which drives the engine and fires the reporter as it goes.
+ */
+export async function runBenchFile(wasmPath: string, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, extraImports: WebAssembly.Imports = {}): Promise<void> {
+  const bytes = fs.readFileSync(wasmPath);
+  filterWasiWarning();
+  const { WASI } = await import("node:wasi");
+  const wasi = new WASI({ version: "preview1", args: [wasmPath], env: {}, preopens: {} });
+
+  let instance: WebAssembly.Instance;
+  const getMem = () => instance.exports.memory as WebAssembly.Memory;
+
+  const imports: WebAssembly.Imports = {
+    wasi_snapshot_preview1: wasi.wasiImport,
+    __asbench: benchImports(getMem, reporter, tunes),
+    ...extraImports,
+  };
+
+  const module = await WebAssembly.compile(bytes as BufferSource);
+  instance = await WebAssembly.instantiate(module, imports);
+  wasi.start(instance);
+}
+
+// --- generic instantiation (used by the playground runner & custom runners) ---
 
 function resolveRuntimeTarget(): RuntimeTarget {
   const env = process.env.AS_BENCH_RUNTIME_TARGET;
@@ -33,9 +149,8 @@ function resolveWasmPath(): string {
 }
 
 /**
- * Default import object. `env.abort` mirrors AssemblyScript's abort ABI; the
- * `bench` namespace carries the host calls the engine relies on (currently just
- * `now`). Runners may spread additional imports on top.
+ * Default import object for plain instantiation. `env.abort` mirrors
+ * AssemblyScript's abort ABI. Runners may spread additional imports on top.
  */
 export function defaultImports(): WebAssembly.Imports {
   return {
@@ -43,9 +158,6 @@ export function defaultImports(): WebAssembly.Imports {
       abort(_msg: number, _file: number, line: number, column: number): void {
         throw new Error(`as-bench: wasm abort at ${line}:${column}`);
       },
-    },
-    bench: {
-      now,
     },
   };
 }

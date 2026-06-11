@@ -1,59 +1,39 @@
 // Public as-bench API. A benchmark file imports these and declares benchmarks;
 // there is no deferred run() entry point — the file's top-level code IS the
 // run (as-tral style: it executes at module start), and `bench()` drives the
-// statistics engine (engine.ts, step 2) immediately when called.
+// statistics engine immediately when called.
 
-import { BenchDescriptor, SuiteDescriptor, Settings } from "./types";
+import * as engine from "./engine";
 
 export { Settings, SamplingMode } from "./types";
 
-/** Active run settings; mutated by `set()`. */
-export const settings = new Settings();
+/**
+ * Live run settings. Mutate fields before the first `bench()`:
+ *
+ *   settings.warmupTime = 500;       // ms
+ *   settings.measurementTime = 1000; // ms
+ *
+ * The host CLI can override any of these per run (e.g. --samples 50).
+ */
+export const settings = engine.settings;
 
-/** Top-level benchmarks (declared outside any `suite`). */
-export const benches: BenchDescriptor[] = [];
-
-/** Registered suites. */
-export const suites: SuiteDescriptor[] = [];
-
-// The suite currently being populated during a `suite(...)` callback, or null
-// when registering at the top level.
-let currentSuite: SuiteDescriptor | null = null;
-
-/** Override run tunables. Call before any benchmark executes. */
-export function set(options: Settings): void {
-  settings.warmupTime = options.warmupTime;
-  settings.measurementTime = options.measurementTime;
-  settings.sampleSize = options.sampleSize;
-  settings.numResamples = options.numResamples;
-  settings.samplingMode = options.samplingMode;
-  settings.confidenceLevel = options.confidenceLevel;
-  settings.significanceLevel = options.significanceLevel;
-  settings.noiseThreshold = options.noiseThreshold;
-}
-
-/** Benchmark a routine. Executes immediately; inside a `suite()` it is grouped. */
+/**
+ * Benchmark a routine: warmup → sampling plan → timed samples → bootstrap
+ * analysis, reported to the host as it happens. Executes immediately.
+ */
 export function bench(description: string, routine: () => void): void {
-  const descriptor = new BenchDescriptor(description, routine);
-  const suite = currentSuite;
-  if (suite !== null) {
-    suite.benches.push(descriptor);
-  } else {
-    benches.push(descriptor);
-  }
-  // TODO(step 2): drive the as-tral statistics engine over `routine` right
-  // here (warmup → sampling → bootstrap → outliers) and stream results to the
-  // host via WIPC. Suite membership only affects baseline comparison.
+  engine.runBench(description, routine);
 }
 
-/** Register a group of related benchmarks. */
+/**
+ * Group related benchmarks. The first `bench()` in the suite is the baseline;
+ * each subsequent one additionally reports its delta against that baseline
+ * (bootstrap CI on the mean ratio + permutation-test p-value).
+ */
 export function suite(description: string, body: () => void): void {
-  const descriptor = new SuiteDescriptor(description);
-  suites.push(descriptor);
-  const previous = currentSuite;
-  currentSuite = descriptor;
+  engine.beginSuite(description);
   body();
-  currentSuite = previous;
+  engine.endSuite();
 }
 
 // Scratch cell that forces a value through linear memory so the optimizer can't

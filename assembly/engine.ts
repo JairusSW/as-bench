@@ -1,0 +1,511 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Statistics engine, ported from as-tral (https://github.com/romdotdog/as-tral,
+// Copyright © romdotdog, Apache License 2.0), itself a port of Criterion.rs's
+// analysis pipeline (https://github.com/bheisler/criterion.rs). Changes from
+// as-tral: settings are runtime values (host-tunable via `tune`) instead of
+// transform-injected compile-time globals, buffers are (re)allocated lazily to
+// match, bench/suite names cross the host boundary as strings instead of
+// enumeration ids, and the resample-median bug in the univariate bootstrap is
+// fixed (as-tral computed the median of the median distribution itself).
+
+import * as host from "./util/host";
+import { Settings, SamplingMode } from "./types";
+
+/** Live settings; benchmark files mutate fields before their first `bench()`. */
+export const settings = new Settings();
+
+// flags bits (as-tral layout): 0b1 host baseline loaded (unused until the
+// baseline feature lands), 0b10 slope estimate exists, 0b100 inside a suite,
+// 0b1000 suite baseline captured.
+const FLAG_SLOPE: u32 = 0b10;
+const FLAG_IN_SUITE: u32 = 0b100;
+const FLAG_SUITE_BASELINE: u32 = 0b1000;
+let flags: u32 = 0;
+
+// Effective per-bench config, resolved from `settings` + host.tune() at each
+// bench start. The helpers below read these instead of as-tral's __astral__*.
+let cfgSampleSize: i32 = 0;
+let cfgNumResamples: i32 = 0;
+let cfgWarmupTime: f64 = 0;
+let cfgMeasurementTime: f64 = 0;
+let cfgSamplingMode: i32 = 0;
+let cfgConfidenceLevel: f64 = 0;
+
+namespace Sampling {
+  export function chooseSamplingMode(met: f64): bool {
+    // https://github.com/bheisler/criterion.rs/blob/970aa04aa5ee0514d1930c83a58c6ca994727567/src/lib.rs#L1416
+    const sampleCount = cfgSampleSize as u64;
+    const targetTime = cfgMeasurementTime;
+    const totalRuns = ((sampleCount * (sampleCount + 1)) / 2) as f64;
+    const d = ceil(targetTime / met / totalRuns);
+    const expectedMs = totalRuns * d * met;
+    return expectedMs > 2 * targetTime;
+  }
+
+  export function linearSampling(arrToWrite: StaticArray<u64>, met: f64): void {
+    const sampleCount = cfgSampleSize as u64;
+    const targetTime = cfgMeasurementTime;
+    const totalRuns = ((sampleCount * (sampleCount + 1)) / 2) as f64;
+    const df = max(1, ceil(targetTime / met / totalRuns));
+    const d = df as u64;
+
+    if (d == 1) {
+      const expectedMs = totalRuns * df * met;
+      host.faultyConfig(1, expectedMs, recommendLinearSampleSize(met));
+    }
+
+    for (let i = 0, a = 1; i < cfgSampleSize; i = a++) {
+      arrToWrite[i] = a * d;
+    }
+  }
+
+  export function flatSampling(arrToWrite: StaticArray<u64>, met: f64): void {
+    const sampleCount = cfgSampleSize;
+    const msPerSample = cfgMeasurementTime / (sampleCount as f64);
+    const iterationsPerSample = max(1, ceil(msPerSample / met) as u64);
+
+    if (iterationsPerSample == 1) {
+      const expectedMs = ((iterationsPerSample * sampleCount) as f64) * met;
+      host.faultyConfig(0, expectedMs, recommendFlatSampleSize(met));
+    }
+
+    for (let i = 0; i < sampleCount; ++i) {
+      arrToWrite[i] = iterationsPerSample;
+    }
+  }
+
+  function recommendLinearSampleSize(met: f64): f64 {
+    const c = cfgMeasurementTime / met;
+    let sampleSize = (-1.0 + sqrt(4.0 * c) / 2) as u64;
+    sampleSize = (sampleSize / 10) * 10;
+    return max(10, sampleSize) as f64;
+  }
+
+  function recommendFlatSampleSize(met: f64): f64 {
+    let sampleSize = (cfgMeasurementTime / met) as u64;
+    sampleSize = (sampleSize / 10) * 10;
+    return max(10, sampleSize) as f64;
+  }
+}
+
+namespace Stats {
+  // https://github.com/bheisler/criterion.rs/blob/ceade3b1d72c3ecef0896cbe0dee12f43a6ce240/src/stats/univariate/sample.rs#L18
+  export function mean(sample: StaticArray<f64>): f64 {
+    return sample.reduce<f64>((a, b) => a + b, 0) / sample.length;
+  }
+
+  function variance(sample: StaticArray<f64>, mean: f64): f64 {
+    let sum: f64 = 0;
+    for (let i = 0; i < sample.length; ++i) {
+      sum += (sample[i] - mean) ** 2;
+    }
+    return sum / (sample.length - 1);
+  }
+
+  export function stdDev(sample: StaticArray<f64>, mean: f64): f64 {
+    return sqrt(variance(sample, mean));
+  }
+
+  export function t(sample: StaticArray<f64>, other: StaticArray<f64>): f64 {
+    const xBar = mean(sample);
+    const yBar = mean(other);
+    const s2X = variance(sample, xBar);
+    const s2Y = variance(other, yBar);
+    const num = xBar - yBar;
+    const den = sqrt(s2X / sample.length + s2Y / other.length);
+    return num / den;
+  }
+
+  export function p_value_2(sample: StaticArray<f64>, t: f64): f64 {
+    const n = sample.length;
+    let hits = 0;
+    for (let i = 0; i < sample.length; ++i) {
+      hits += sample[i] < t ? 1 : 0;
+    }
+    return (min(hits, n - hits) / n) * 2;
+  }
+
+  // invariant: sample must be sorted
+  export namespace sorted {
+    export function median(sample: StaticArray<f64>): f64 {
+      const n = sample.length;
+      if (n % 2 == 1) {
+        return sample[n / 2];
+      } else {
+        const i = n / 2;
+        return (sample[i - 1] + sample[i]) / 2;
+      }
+    }
+
+    export function MAD(sample: StaticArray<f64>, median: f64): f64 {
+      const absDevs = new StaticArray<f64>(sample.length);
+      for (let i = 0; i < sample.length; ++i) {
+        absDevs[i] = abs(sample[i] - median);
+      }
+
+      absDevs.sort();
+      return sorted.median(absDevs) * 1.4826;
+    }
+
+    // unchecked
+    // - p must be in the range [0, 100]
+    export function percentile(sample: StaticArray<f64>, p: f64): f64 {
+      const len = sample.length - 1;
+      if (p == 100) {
+        return sample[len];
+      }
+
+      const rank: f64 = (p / 100) * len;
+      const integer = floor(rank);
+      const fraction = rank - integer;
+      const n = integer as u32;
+      const flooring = unchecked(sample[n]);
+      const ceiling = unchecked(sample[n + 1]);
+
+      return flooring + (ceiling - flooring) * fraction;
+    }
+
+    export namespace CI {
+      export function LB(sample: StaticArray<f64>): f64 {
+        return percentile(sample, 50 * (1 - cfgConfidenceLevel));
+      }
+
+      export function HB(sample: StaticArray<f64>): f64 {
+        return percentile(sample, 50 * (1 + cfgConfidenceLevel));
+      }
+    }
+  }
+}
+
+namespace Regression {
+  function dot(x: StaticArray<f64>, y: StaticArray<f64>): f64 {
+    let sum: f64 = 0;
+    for (let i = 0; i < x.length; ++i) {
+      sum += x[i] * y[i];
+    }
+    return sum;
+  }
+
+  export function fit(x: StaticArray<f64>, y: StaticArray<f64>): f64 {
+    const xy = dot(x, y);
+    const x2 = dot(x, x);
+    return xy / x2;
+  }
+}
+
+// --- working buffers, sized to the effective settings ------------------------
+// as-tral sized these at compile time from transform-injected constants; here
+// settings are runtime values, so buffers are (re)allocated whenever the
+// effective (sampleSize, numResamples) pair changes. A mid-suite change drops
+// the captured suite baseline (it lived in the old buffers).
+
+let bufSampleSize: i32 = -1;
+let bufNumResamples: i32 = -1;
+
+let times = new StaticArray<f64>(0);
+let suiteTimes = new StaticArray<f64>(0);
+let averageTimes = new StaticArray<f64>(0);
+
+let mIters = new StaticArray<u64>(0);
+let suiteIters = new StaticArray<f64>(0);
+
+// bootstrapping arrays
+let resampleX = new StaticArray<f64>(0);
+let resampleY = new StaticArray<f64>(0);
+
+let sample = new StaticArray<f64>(0);
+let baseAvgTimes = new StaticArray<f64>(0);
+
+let tDist = new StaticArray<f64>(0);
+let distMeanChange = new StaticArray<f64>(0);
+let meanChangePoint: f64 = 0;
+let pValue: f64 = 0;
+
+let distMean = new StaticArray<f64>(0);
+let distStdDev = new StaticArray<f64>(0);
+let distMedian = new StaticArray<f64>(0);
+let distMAD = new StaticArray<f64>(0);
+
+// for linear sampling
+let mItersF = new StaticArray<f64>(0);
+let distFit = new StaticArray<f64>(0);
+
+function ensureBuffers(sampleSize: i32, numResamples: i32): void {
+  if (sampleSize == bufSampleSize && numResamples == bufNumResamples) return;
+
+  times = new StaticArray<f64>(sampleSize);
+  suiteTimes = new StaticArray<f64>(sampleSize);
+  averageTimes = new StaticArray<f64>(sampleSize);
+  mIters = new StaticArray<u64>(sampleSize);
+  suiteIters = new StaticArray<f64>(sampleSize);
+  resampleX = new StaticArray<f64>(sampleSize);
+  resampleY = new StaticArray<f64>(sampleSize);
+  sample = new StaticArray<f64>(sampleSize * 2);
+  baseAvgTimes = new StaticArray<f64>(sampleSize);
+  mItersF = new StaticArray<f64>(sampleSize);
+
+  tDist = new StaticArray<f64>(numResamples);
+  distMeanChange = new StaticArray<f64>(numResamples);
+  distMean = new StaticArray<f64>(numResamples);
+  distStdDev = new StaticArray<f64>(numResamples);
+  distMedian = new StaticArray<f64>(numResamples);
+  distMAD = new StaticArray<f64>(numResamples);
+  distFit = new StaticArray<f64>(numResamples);
+
+  bufSampleSize = sampleSize;
+  bufNumResamples = numResamples;
+  flags &= ~FLAG_SUITE_BASELINE; // old baseline arrays are gone
+}
+
+// --- public engine entry points ----------------------------------------------
+
+export function beginSuite(name: string): void {
+  host.suiteStart(changetype<usize>(name), name.length);
+  flags |= FLAG_IN_SUITE;
+  flags &= ~FLAG_SUITE_BASELINE;
+}
+
+export function endSuite(): void {
+  host.suiteEnd();
+  flags &= ~(FLAG_IN_SUITE | FLAG_SUITE_BASELINE);
+}
+
+export function runBench(name: string, routine: () => void): void {
+  host.benchStart(changetype<usize>(name), name.length);
+
+  // resolve effective settings (host gets an override shot at each)
+  cfgWarmupTime = host.tune(0, settings.warmupTime);
+  cfgMeasurementTime = host.tune(1, settings.measurementTime);
+  const sampleSize = <i32>host.tune(2, <f64>settings.sampleSize);
+  const numResamples = <i32>host.tune(3, <f64>settings.numResamples);
+  cfgSamplingMode = <i32>host.tune(4, <f64>(settings.samplingMode as i32));
+  cfgConfidenceLevel = host.tune(5, settings.confidenceLevel);
+  cfgSampleSize = sampleSize;
+  cfgNumResamples = numResamples;
+  ensureBuffers(sampleSize, numResamples);
+
+  // warmup
+  // https://github.com/bheisler/criterion.rs/blob/ceade3b1d72c3ecef0896cbe0dee12f43a6ce240/src/routine.rs#L216
+  let warmupIters: u64 = 1;
+  let totalWarmupIters: u64 = 0;
+  let warmupElapsedTime: f64 = 0;
+
+  host.warmupStarted(cfgWarmupTime);
+  while (true) {
+    let start = host.now();
+
+    for (let i: u64 = 0; i < warmupIters; ++i) {
+      routine();
+    }
+
+    totalWarmupIters += warmupIters;
+    warmupElapsedTime += host.now() - start;
+    if (warmupElapsedTime > cfgWarmupTime) {
+      break;
+    }
+
+    warmupIters *= 2;
+  }
+
+  // mean execution time per iteration, the basis of the sampling plan
+  const met = warmupElapsedTime / (totalWarmupIters as f64);
+  const useFlatSampling = cfgSamplingMode == <i32>SamplingMode.Auto ? Sampling.chooseSamplingMode(met) : cfgSamplingMode == <i32>SamplingMode.Flat;
+
+  if (useFlatSampling) {
+    Sampling.flatSampling(mIters, met);
+  } else {
+    Sampling.linearSampling(mIters, met);
+  }
+
+  let expectedMs: f64 = 0;
+  let totalIters: f64 = 0;
+  for (let i = 0; i < cfgSampleSize; ++i) {
+    const iters = mIters[i] as f64;
+    expectedMs += iters * met;
+    totalIters += iters;
+  }
+  host.measureStarted(expectedMs, totalIters, cfgSampleSize);
+
+  // sample collection
+  let notWarned = true;
+  for (let i = 0; i < cfgSampleSize; ++i) {
+    let start = host.now();
+
+    const iters = mIters[i];
+    for (let j: u64 = 0; j < iters; ++j) {
+      routine();
+    }
+
+    const res = host.now() - start;
+    if (res == 0 && notWarned) {
+      host.faultyBenchmark();
+      notWarned = false;
+    }
+
+    times[i] = res;
+    averageTimes[i] = res / (iters as f64);
+  }
+
+  host.analyzing();
+  averageTimes.sort();
+
+  // point estimates
+  const meanPoint = Stats.mean(averageTimes);
+  const stdDevPoint = Stats.stdDev(averageTimes, meanPoint);
+  const medianPoint = Stats.sorted.median(averageTimes);
+  const MADPoint = Stats.sorted.MAD(averageTimes, medianPoint);
+
+  // univariate bootstrap over the per-iteration averages
+  for (let i = 0; i < cfgNumResamples; ++i) {
+    for (let j = 0; j < cfgSampleSize; ++j) {
+      resampleY[j] = averageTimes[(Math.random() * cfgSampleSize) as u32];
+    }
+
+    resampleY.sort();
+
+    const mean = Stats.mean(resampleY);
+    distMean[i] = mean;
+    distStdDev[i] = Stats.stdDev(resampleY, mean);
+
+    // as-tral read the median off the (still-empty) median distribution here;
+    // the resample itself is what's being summarized.
+    const median = Stats.sorted.median(resampleY);
+    distMedian[i] = median;
+    distMAD[i] = Stats.sorted.MAD(resampleY, median);
+  }
+
+  distMean.sort();
+  distStdDev.sort();
+  distMedian.sort();
+  distMAD.sort();
+
+  // confidence intervals
+  host.estimate(0, Stats.sorted.CI.LB(distMean), meanPoint, Stats.sorted.CI.HB(distMean));
+  host.estimate(1, Stats.sorted.CI.LB(distMedian), medianPoint, Stats.sorted.CI.HB(distMedian));
+  host.estimate(2, Stats.sorted.CI.LB(distStdDev), stdDevPoint, Stats.sorted.CI.HB(distStdDev));
+  host.estimate(3, Stats.sorted.CI.LB(distMAD), MADPoint, Stats.sorted.CI.HB(distMAD));
+
+  // regression: headline is the slope under linear sampling, the mean under flat
+  if (useFlatSampling) {
+    flags &= ~FLAG_SLOPE;
+    host.result(Stats.sorted.CI.LB(distMean), meanPoint, Stats.sorted.CI.HB(distMean));
+  } else {
+    flags |= FLAG_SLOPE;
+    for (let i = 0; i < cfgSampleSize; ++i) {
+      mItersF[i] = mIters[i] as f64;
+    }
+
+    const slopePoint = Regression.fit(mItersF, times);
+
+    // bivariate bootstrap over (iterations, time) pairs
+    for (let i = 0; i < cfgNumResamples; ++i) {
+      for (let j = 0; j < cfgSampleSize; ++j) {
+        const k = (Math.random() * cfgSampleSize) as u32;
+        resampleX[j] = mItersF[k];
+        resampleY[j] = times[k];
+      }
+      distFit[i] = Regression.fit(resampleX, resampleY);
+    }
+
+    distFit.sort();
+    const slopeLB = Stats.sorted.CI.LB(distFit);
+    const slopeHB = Stats.sorted.CI.HB(distFit);
+    host.estimate(4, slopeLB, slopePoint, slopeHB);
+    host.result(slopeLB, slopePoint, slopeHB);
+  }
+
+  // suite-relative comparison: first bench is the baseline, the rest report
+  // their delta against it
+  if ((flags & FLAG_IN_SUITE) != 0) {
+    if ((flags & FLAG_SUITE_BASELINE) != 0) {
+      compare(changetype<usize>(suiteTimes), changetype<usize>(suiteIters));
+      distMeanChange.sort();
+      host.suiteChange(Stats.sorted.CI.LB(distMeanChange), meanChangePoint, Stats.sorted.CI.HB(distMeanChange), pValue);
+    } else {
+      for (let i = 0; i < cfgSampleSize; ++i) {
+        suiteIters[i] = mIters[i] as f64;
+        suiteTimes[i] = times[i];
+      }
+      flags |= FLAG_SUITE_BASELINE;
+    }
+  }
+
+  // Tukey fences over the per-iteration averages
+  const mild = 1.5;
+  const severe = 3;
+
+  const q1 = Stats.sorted.percentile(averageTimes, 25);
+  const q3 = Stats.sorted.percentile(averageTimes, 75);
+  const iqr = q3 - q1;
+  const lost = q1 - severe * iqr;
+  const lomt = q1 - mild * iqr;
+  const himt = q3 + mild * iqr;
+  const hist = q3 + severe * iqr;
+
+  let los = 0;
+  let lom = 0;
+  let him = 0;
+  let his = 0;
+  for (let i = 0; i < cfgSampleSize; i++) {
+    const x = averageTimes[i];
+    if (x < lost) ++los;
+    else if (x > hist) ++his;
+    else if (x < lomt) ++lom;
+    else if (x > himt) ++him;
+  }
+
+  host.outliers(los, lom, him, his);
+  host.benchEnd();
+}
+
+// Two-sample comparison against a baseline given as raw (times, iters) f64
+// arrays — pointer-based so it can read either the suite buffers or, later,
+// a host-loaded saved baseline.
+function compare(timesPtr: usize, itersPtr: usize): void {
+  for (let i = 0; i < cfgSampleSize; ++i) {
+    const baseAvgTime = load<f64>(timesPtr + ((<usize>i) << alignof<f64>())) / load<f64>(itersPtr + ((<usize>i) << alignof<f64>()));
+    baseAvgTimes[i] = baseAvgTime;
+
+    sample[i] = averageTimes[i];
+    sample[i + cfgSampleSize] = baseAvgTime;
+  }
+
+  // mixed two-sample bootstrap on t score (criterion: analysis/compare.rs > t_test)
+  const tPoint = Stats.t(averageTimes, baseAvgTimes);
+  for (let i = 0; i < cfgNumResamples; ++i) {
+    for (let j = 0; j < cfgSampleSize; ++j) {
+      resampleX[j] = sample[(Math.random() * cfgSampleSize * 2) as u32];
+      resampleY[j] = sample[(Math.random() * cfgSampleSize * 2) as u32];
+    }
+    tDist[i] = Stats.t(resampleX, resampleY);
+  }
+
+  // estimate change (criterion: analysis/compare.rs > estimates)
+  meanChangePoint = Stats.mean(averageTimes) / Stats.mean(baseAvgTimes) - 1.0;
+
+  baseAvgTimes.sort();
+
+  // two-sample bootstrap (criterion: stats/univariate/mod.rs > bootstrap)
+  const numResamplesSqrt = <i32>ceil(sqrt(<f64>cfgNumResamples));
+  const perChunk = (cfgNumResamples + numResamplesSqrt - 1) / numResamplesSqrt;
+  for (let i = 0; i < numResamplesSqrt; ++i) {
+    const start = i * perChunk;
+    const end = min((i + 1) * perChunk, cfgNumResamples);
+
+    for (let j = 0; j < cfgSampleSize; ++j) {
+      resampleX[j] = averageTimes[(Math.random() * cfgSampleSize) as u32];
+    }
+
+    resampleX.sort();
+    for (let k = start; k < end; ++k) {
+      for (let j = 0; j < cfgSampleSize; ++j) {
+        resampleY[j] = baseAvgTimes[(Math.random() * cfgSampleSize) as u32];
+      }
+      resampleY.sort();
+      distMeanChange[k] = Stats.mean(resampleX) / Stats.mean(resampleY) - 1.0;
+    }
+  }
+
+  pValue = Stats.p_value_2(tDist, tPoint);
+}

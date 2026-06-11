@@ -1,6 +1,5 @@
-// Core descriptors and settings for the as-bench engine. The statistics engine
-// itself (warmup, sampling, bootstrap, outliers, comparison — ported from
-// as-tral) lands in engine.ts in step 2; these are the shapes it operates over.
+// Settings for the as-bench engine (engine.ts). Defaults mirror
+// as-tral / Criterion.rs.
 
 /** Sampling strategy for the measurement loop. */
 export const enum SamplingMode {
@@ -10,8 +9,8 @@ export const enum SamplingMode {
 }
 
 /**
- * Tunables for a benchmark run. Defaults mirror as-tral / Criterion.rs.
- * `set()` in index.ts overrides these before `run()`.
+ * Tunables for a benchmark run. Mutate via the exported `settings` instance;
+ * the host may override any of these per run (CLI flags → the `tune` import).
  */
 export class Settings {
   warmupTime: f64 = 3000; // ms
@@ -20,25 +19,6 @@ export class Settings {
   numResamples: i32 = 100000; // bootstrap resamples
   samplingMode: SamplingMode = SamplingMode.Auto;
   confidenceLevel: f64 = 0.95;
-  significanceLevel: f64 = 0.05;
-  noiseThreshold: f64 = 0.01;
-}
-
-/** A single registered benchmark: a named routine to be timed. */
-export class BenchDescriptor {
-  description: string;
-  routine: () => void;
-  constructor(description: string, routine: () => void) {
-    this.description = description;
-    this.routine = routine;
-  }
-}
-
-/** A named group of benchmarks, optionally compared against each other. */
-export class SuiteDescriptor {
-  description: string;
-  benches: BenchDescriptor[] = [];
-  constructor(description: string) {
-    this.description = description;
-  }
+  significanceLevel: f64 = 0.05; // host-side: p-value threshold for "changed"
+  noiseThreshold: f64 = 0.01; // host-side: ignore changes within ±1%
 }

@@ -71,7 +71,7 @@
     "@JairusSW:registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "npm run build:cli && npm run build:lib && npm run build:transform",
+    "build": "npm run build:lib && npm run build:cli && npm run build:transform",
     "build:cli": "rm -rf ./bin/ && tsc -p cli && prettier -w ./bin/ && chmod +x ./bin/index.js",
     "build:lib": "rm -rf ./lib/build && tsc -p ./tsconfig.lib.json",
     "build:transform": "rm -rf ./transform/lib && tsc -p ./transform && prettier -w ./transform/lib/",

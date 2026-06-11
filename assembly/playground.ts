@@ -1,17 +1,21 @@
 // Scratchpad for small as-bench demos. Not shipped, not a spec — edit freely.
 //   npm run playground   (or: npm run pg)
-// builds this file (transform included) and runs it on the scaffold host.
+// builds this file (transform included) and runs it on the as-bench host.
 
-import { bench, suite, blackbox, benches, suites } from "./index";
+import { bench, suite, blackbox, settings } from "./index";
+
+// Keep the playground loop snappy; bump these to criterion defaults for real
+// numbers (3000 / 5000 / 100000).
+settings.warmupTime = 100;
+settings.measurementTime = 250;
+settings.numResamples = 10000;
 
 function fib(n: i32): i32 {
   return n < 2 ? n : fib(n - 1) + fib(n - 2);
 }
 
-// --- registration demo (engine lands in step 2; run() is still a no-op) -----
-
 bench("fib(20)", () => {
-  blackbox<i32>(fib(20));
+  blackbox<i32>(fib(blackbox<i32>(20)));
 });
 
 suite("arith", () => {
@@ -22,15 +26,3 @@ suite("arith", () => {
     blackbox<i32>(blackbox<i32>(6) * blackbox<i32>(7));
   });
 });
-
-console.log(`registered: ${benches.length} top-level bench(es), ${suites.length} suite(s)`);
-
-// --- hand-rolled timing loop, stand-in until the as-tral engine is ported ---
-
-const ITERS = 1000;
-const start = Date.now();
-for (let i = 0; i < ITERS; i++) {
-  blackbox<i32>(fib(20));
-}
-const elapsed = Date.now() - start;
-console.log(`fib(20) x ${ITERS}: ${elapsed}ms (~${(<f64>elapsed * 1e6) / <f64>ITERS} ns/iter)`);
