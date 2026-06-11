@@ -117,7 +117,7 @@ const ESTIMATE_NAMES: Record<number, string> = {
   [EstimateKind.Slope]: "slope",
 };
 
-class Renderer implements BenchReporter {
+export class Renderer implements BenchReporter {
   private current = "";
   private sampleCount = 0;
   private suiteName: string | null = null;

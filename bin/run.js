@@ -98,7 +98,7 @@ const ESTIMATE_NAMES = {
   [EstimateKind.MAD]: "MAD",
   [EstimateKind.Slope]: "slope",
 };
-class Renderer {
+export class Renderer {
   constructor(verbose) {
     this.verbose = verbose;
     this.current = "";
