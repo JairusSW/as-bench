@@ -9,6 +9,8 @@ logs
 as-tral
 *.lockb
 build/
+!lib/build/
+!lib/build/**
 *.tmp.ts
 *.map
 .as-bench/*
