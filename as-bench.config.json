@@ -1,0 +1,30 @@
+{
+  "$schema": "./as-bench.config.schema.json",
+  "input": ["assembly/__benches__/**/*.ts"],
+  "settings": {
+    "warmupTime": 250,
+    "measurementTime": 500,
+    "numResamples": 20000
+  },
+  "modes": {
+    "full": {
+      "settings": {
+        "warmupTime": 3000,
+        "measurementTime": 5000,
+        "numResamples": 100000
+      }
+    },
+    "wasmtime": {
+      "runtime": "wasmtime"
+    },
+    "wasmer": {
+      "runtime": "wasmer"
+    },
+    "wazero": {
+      "runtime": "wazero"
+    },
+    "deterministic": {
+      "deterministic": true
+    }
+  }
+}

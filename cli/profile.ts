@@ -3,11 +3,14 @@ import chalk from "chalk";
 import { benchImports } from "../lib/build/as-bs.js";
 import { buildBenchFile, findBenchFiles } from "./run.js";
 import { instrumentWasm, type ProfiledFunction } from "./instrument.js";
+import { loadConfig } from "./config.js";
 
 interface ProfileFlags {
-  top: number;
-  all: boolean;
+  top?: number;
+  all?: boolean;
   heaviest: "instr" | "time";
+  configPath?: string;
+  mode?: string;
 }
 
 interface FnRow {
@@ -23,7 +26,7 @@ interface BenchProfile {
 }
 
 export function parseProfileFlags(args: string[]): { flags: ProfileFlags; selectors: string[] } {
-  const flags: ProfileFlags = { top: 10, all: false, heaviest: "instr" };
+  const flags: ProfileFlags = { heaviest: "instr" };
   const selectors: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -32,7 +35,13 @@ export function parseProfileFlags(args: string[]): { flags: ProfileFlags; select
       if (!Number.isInteger(n) || n < 1) throw new Error(`--top expects a positive integer`);
       flags.top = n;
     } else if (a === "--all") flags.all = true;
-    else if (a.startsWith("--heaviest=")) {
+    else if (a === "--config") {
+      flags.configPath = args[++i];
+      if (!flags.configPath || flags.configPath.startsWith("-")) throw new Error("--config expects a path");
+    } else if (a === "--mode") {
+      flags.mode = args[++i];
+      if (!flags.mode || flags.mode.startsWith("-")) throw new Error("--mode expects a mode name");
+    } else if (a.startsWith("--heaviest=")) {
       const mode = a.slice("--heaviest=".length);
       if (mode !== "instr" && mode !== "time") throw new Error(`--heaviest expects instr|time, got "${mode}"`);
       flags.heaviest = mode;
@@ -111,18 +120,18 @@ function isInternal(name: string): boolean {
   return /(^|~lib\/as-bench\/)assembly\/(engine|util\/host|index)\b/.test(name) || name.startsWith("~lib/rt/");
 }
 
-function render(file: string, profiles: BenchProfile[], flags: ProfileFlags): void {
+function render(file: string, profiles: BenchProfile[], top: number, all: boolean): void {
   console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(" (wasm instructions, approximate; 1 run per bench)"));
   for (const p of profiles) {
     console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatCount(p.total)} instructions`);
-    const rows = flags.all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
-    for (const row of rows.slice(0, flags.top)) {
+    const rows = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
+    for (const row of rows.slice(0, top)) {
       const pct = p.total > 0n ? Number((row.instrs * 10000n) / p.total) / 100 : 0;
       const perCall = row.calls > 0n ? formatCount(row.instrs / row.calls) : "-";
       console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatCount(row.instrs).padStart(14)}  ${formatCount(row.calls).padStart(11)} calls  ${perCall.padStart(9)}/call  ${row.name}`);
     }
     const hidden = p.rows.length - rows.length;
-    if (hidden > 0 && !flags.all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
+    if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
   }
 }
 
@@ -134,7 +143,11 @@ export async function executeProfile(args: string[]): Promise<void> {
     return;
   }
 
-  const files = await findBenchFiles(selectors);
+  const cfg = loadConfig(flags.configPath, flags.mode);
+  const top = flags.top ?? cfg.profile.top;
+  const all = flags.all ?? cfg.profile.all;
+
+  const files = await findBenchFiles(selectors, cfg.input);
   if (files.length === 0) {
     console.error(chalk.red(`no benchmark files found`));
     process.exitCode = 1;
@@ -145,12 +158,12 @@ export async function executeProfile(args: string[]): Promise<void> {
     console.log(chalk.dim(`compiling ${file}`));
     // --debug keeps the name section (--optimize strips it) so the profile
     // can attribute counts to function names; codegen is still optimized
-    const wasmPath = await buildBenchFile(file, ["--debug"]);
+    const wasmPath = await buildBenchFile(file, cfg, ["--debug"]);
     const { wasm, functions } = await instrumentWasm(fs.readFileSync(wasmPath));
     const instrPath = wasmPath.replace(/\.wasm$/, ".instr.wasm");
     fs.writeFileSync(instrPath, wasm);
     console.log(chalk.dim(`instrumented ${functions.length} functions -> ${instrPath}`));
     const profiles = await runProfiled(instrPath, functions);
-    render(file, profiles, flags);
+    render(file, profiles, top, all);
   }
 }

@@ -1,0 +1,186 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "as-bench configuration",
+  "description": "Configuration for the as-bench benchmarking framework. Precedence: built-in defaults < this file < --mode overlay < CLI flags.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Engine tunables. These override the settings.* values set inside benchmark files (they flow to the wasm via the tune hook), and are themselves overridden by CLI flags.",
+      "properties": {
+        "warmupTime": {
+          "type": "number",
+          "minimum": 0,
+          "default": 3000,
+          "description": "Warmup time cap in milliseconds. Adaptive warmup may exit earlier once timings stabilize."
+        },
+        "warmupMinTime": {
+          "type": "number",
+          "minimum": 0,
+          "default": 100,
+          "description": "Earliest point (ms) at which adaptive warmup may declare convergence."
+        },
+        "warmupTolerance": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.02,
+          "description": "Relative drift between consecutive warmup batches considered stable (0.02 = 2%). 0 disables adaptive exit (criterion-style fixed-time warmup)."
+        },
+        "measurementTime": {
+          "type": "number",
+          "minimum": 1,
+          "default": 5000,
+          "description": "Target measurement time in milliseconds across all samples of a bench."
+        },
+        "sampleSize": {
+          "type": "number",
+          "minimum": 10,
+          "default": 100,
+          "description": "Number of timed samples collected per bench."
+        },
+        "numResamples": {
+          "type": "number",
+          "minimum": 1,
+          "default": 100000,
+          "description": "Bootstrap resamples used for confidence intervals and comparisons."
+        },
+        "samplingMode": {
+          "enum": ["auto", "linear", "flat"],
+          "default": "auto",
+          "description": "linear scales iterations across samples (enables the slope estimate); flat uses a constant count; auto picks per bench."
+        },
+        "confidenceLevel": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.95,
+          "description": "Confidence level for all interval bounds (0.95 = 95% CI)."
+        }
+      }
+    },
+    "render": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host-side result rendering thresholds (the engine does not use these).",
+      "properties": {
+        "significanceLevel": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.05,
+          "description": "p-value threshold below which a delta counts as statistically significant."
+        },
+        "noiseThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.01,
+          "description": "Deltas whose entire confidence interval lies within ±this ratio render as 'no change' (criterion's rule)."
+        }
+      }
+    },
+    "buildOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How bench files are compiled with asc.",
+      "properties": {
+        "optimize": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pass --optimize to asc. Note: optimization level interacts with V8 tier heuristics on the node runtime; external runtimes (wasmtime etc.) are tier-free."
+        },
+        "debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass --debug to asc (keeps the name section + debug info). Profile builds add this automatically."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra asc arguments appended to every bench build (e.g. [\"--enable\", \"simd\"])."
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Defaults for the `asb profile` command.",
+      "properties": {
+        "top": {
+          "type": "number",
+          "minimum": 1,
+          "default": 10,
+          "description": "Rows shown per bench in the heaviest-calls table."
+        },
+        "all": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include engine/runtime-internal rows in profile tables."
+        }
+      }
+    },
+    "configBody": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["assembly/__benches__/**/*.ts"],
+          "description": "Benchmark file globs (positional CLI arguments override)."
+        },
+        "outDir": {
+          "type": "string",
+          "default": ".as-bench/build",
+          "description": "Directory for compiled bench artifacts."
+        },
+        "baselineDir": {
+          "type": "string",
+          "default": ".as-bench/baselines",
+          "description": "Directory for baselines saved with --save-baseline."
+        },
+        "runtime": {
+          "type": "string",
+          "default": "node",
+          "description": "node (in-process host) | wasmtime | wasmer | wazero | a command template containing <file>. External runtimes run a pure-WASI build reporting over framed stdout; --baseline comparison and --deterministic need node."
+        },
+        "verbose": {
+          "type": "boolean",
+          "default": false,
+          "description": "Print every estimate (mean/median/std dev/MAD/slope) and warmup convergence per bench."
+        },
+        "deterministic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Record host imports on iteration 2 of each bench and replay them for every later iteration — neutralizes host nondeterminism. node runtime only; adds a few ns of per-iteration overhead, so compare deterministic runs with deterministic runs."
+        },
+        "settings": { "$ref": "#/definitions/settings" },
+        "render": { "$ref": "#/definitions/render" },
+        "buildOptions": { "$ref": "#/definitions/buildOptions" },
+        "profile": { "$ref": "#/definitions/profile" }
+      }
+    }
+  },
+  "allOf": [{ "$ref": "#/definitions/configBody" }],
+  "properties": {
+    "$schema": { "type": "string" },
+    "input": true,
+    "outDir": true,
+    "baselineDir": true,
+    "runtime": true,
+    "verbose": true,
+    "deterministic": true,
+    "settings": true,
+    "render": true,
+    "buildOptions": true,
+    "profile": true,
+    "modes": {
+      "type": "object",
+      "description": "Named partial-config overlays selected with --mode <name>. A mode may override any top-level option; objects merge one level deep, scalars and arrays replace.",
+      "additionalProperties": {
+        "allOf": [{ "$ref": "#/definitions/configBody" }],
+        "type": "object"
+      }
+    }
+  }
+}

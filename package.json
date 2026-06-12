@@ -55,6 +55,7 @@
     "transform/lib/**/*.js",
     "transform/package.json",
     "index.ts",
+    "as-bench.config.schema.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

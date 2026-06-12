@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Configuration file: `as-bench.config.json` (auto-discovered; `--config <path>` to point elsewhere) with a shipped JSON schema (`as-bench.config.schema.json`) for editor autocomplete. Options: `input` globs, `outDir`, `baselineDir`, `runtime`, `verbose`, `deterministic`, `settings.*` (all engine tunables incl. warmup/sampling/bootstrap/confidence), `render.*` (significanceLevel, noiseThreshold — now wired through the renderer instead of constants), `buildOptions.*` (optimize/debug/extra asc args), `profile.*` (top/all).
+- Modes: named partial-config overlays under `"modes"`, applied with `--mode <name>` (objects merge a level deep, scalars/arrays replace). Precedence: defaults < config < mode < CLI flags. The repo's own config ships `full`, `wasmtime`, `wasmer`, `wazero`, and `deterministic` modes.
+- `asb init`: scaffolds a starter `as-bench.config.json` (with `quick` + `wasmtime` modes) and an example bench; `--force` overwrites.
+
 - `asb run --runtime wasmtime|wasmer|wazero|<template>`: external WASI runtimes. WIPC builds (`AS_BENCH_WIPC`) stream all engine events as framed binary messages over stdout (`assembly/util/wipc.ts` → `lib/wipc.ts` parser feeding the same renderer) and read tune overrides from `AS_BENCH_TUNE_<kind>` env vars — the module's only imports are `wasi_snapshot_preview1`, so any WASI runtime can run it. Non-frame stdout passes through (user console.log). `--save-baseline` works externally (sampleDone frame); `--baseline` comparison and `--deterministic` remain node-host-only (request/reply). Validated on all three runtimes: fib(20)/fib(15) = +1004–1018% everywhere (φ⁵ predicts +1009%), with wasmtime CIs at ±0.03µs — tier-free wall-clock.
 - `assembly/util/host.ts` is now a compile-time transport dispatcher (imports vs WIPC frames).
 

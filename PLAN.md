@@ -110,8 +110,10 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
    bounds-checked accessors — `__get` was 55% of bubble sort's instructions.
 5. **Runtime matrix** — core done: `--runtime wasmtime|wasmer|wazero|<template>`
    runs pure-WASI WIPC builds (framed stdout events, env-var tunes; module
-   imports = wasi_snapshot_preview1 only). Remaining: config-file modes
-   (as-test style), browsers, node:bindings target.
+   imports = wasi_snapshot_preview1 only). Config-file + modes done:
+   `as-bench.config.json` + schema, `--config`/`--mode`, precedence
+   defaults < config < mode < flags; `asb init` scaffolds. Remaining:
+   browsers, node:bindings target.
 6. **`--heaviest=time`** — deferred pending design: wrapper-based per-function
    timers give *inclusive* time (recursive functions over-attribute, nested
    wrapper overhead compounds); needs self-time semantics (shadow-stack or

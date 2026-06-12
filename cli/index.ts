@@ -2,6 +2,7 @@
 import chalk from "chalk";
 import { executeRun, executeBuild } from "./run.js";
 import { executeProfile } from "./profile.js";
+import { executeInit } from "./init.js";
 
 // Bumped in lockstep with package.json; the scaffold keeps it inline rather
 // than importing JSON to avoid ESM import-assertion friction in the bin.
@@ -36,17 +37,18 @@ ${chalk.bold("Commands")}
     --heaviest=time     Rank by per-function wall-clock (not yet implemented)
     --top <n>           Rows per bench (default 10)
     --all               Include engine/runtime-internal rows
-  init                Scaffold an as-bench config (not yet implemented)
+  init                Scaffold as-bench.config.json + an example bench (--force overwrites)
+
+${chalk.bold("Configuration")} (run/build/profile)
+  --config <path>     Config file (default ${chalk.dim("as-bench.config.json")} when present)
+  --mode <name>       Apply a named overlay from the config's "modes"
+  Precedence: defaults < config < mode < CLI flags. Schema:
+  ${chalk.dim("node_modules/as-bench/as-bench.config.schema.json")}
 
   help, --help, -h    Show this help
   version, -v         Show the version
 
-Benchmark files default to ${chalk.dim("assembly/__benches__/**/*.ts")}.`;
-
-function notImplemented(cmd: string): void {
-  console.log(chalk.yellow(`as-bench ${cmd}: not yet implemented`));
-  process.exitCode = 1;
-}
+Benchmark files default to the config's input globs (${chalk.dim("assembly/__benches__/**/*.ts")}).`;
 
 async function main(argv: string[]): Promise<void> {
   const cmd = argv[0];
@@ -73,7 +75,7 @@ async function main(argv: string[]): Promise<void> {
       await executeProfile(rest);
       return;
     case "init":
-      notImplemented(cmd);
+      await executeInit(rest);
       return;
     default:
       console.error(chalk.red(`unknown command: ${cmd}`));
