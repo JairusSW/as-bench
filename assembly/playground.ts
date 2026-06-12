@@ -3,6 +3,7 @@
 // builds this file (transform included) and runs it on the as-bench host with
 // the CLI's full renderer.
 
+import { JSON } from "json-as";
 import { bench, suite, blackbox, settings } from "./index";
 
 // Keep the playground loop snappy; bump these to criterion defaults for real
@@ -169,5 +170,58 @@ suite("alloc", () => {
   });
   bench("string += x64", () => {
     blackbox<i32>(stringBuildRef(blackbox<i32>(64)));
+  });
+});
+
+// --- json-as: real-world serialization ------------------------------------------
+// json-as compiles @json classes into specialized (de)serializers — a real
+// allocation-heavy workload. Needs its transform (wired into build:playground
+// and the repo config's buildOptions.args). The same profile commands apply:
+// `asb profile --heaviest=alloc assembly/playground.ts` shows bytes per call,
+// `--heaviest=time` where the cycles go.
+
+@json
+class Vec3 {
+  x: f64 = 0;
+  y: f64 = 0;
+  z: f64 = 0;
+}
+
+
+@json
+class Player {
+  firstName!: string;
+  lastName!: string;
+  age!: i32;
+  pos!: Vec3;
+  isVerified!: boolean;
+}
+
+const player: Player = {
+  firstName: "Emmet",
+  lastName: "West",
+  age: 27,
+  pos: { x: 3.4, y: 1.2, z: 8.3 },
+  isVerified: true,
+};
+const playerJson = JSON.stringify<Player>(player);
+
+function stringifyPlayer(p: Player): string {
+  return JSON.stringify<Player>(p);
+}
+
+function parsePlayer(s: string): Player {
+  return JSON.parse<Player>(s);
+}
+
+const stringifyRef: (p: Player) => string = stringifyPlayer;
+const parseRef: (s: string) => Player = parsePlayer;
+
+suite("json-as", () => {
+  bench("stringify Player", () => {
+    blackbox<string>(stringifyRef(blackbox<Player>(player)));
+  });
+  bench("parse Player", () => {
+    blackbox<Player>(parseRef(blackbox<string>(playerJson)));
   });
 });
