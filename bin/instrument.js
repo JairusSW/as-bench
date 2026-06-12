@@ -110,3 +110,170 @@ export async function instrumentWasm(input) {
   module.dispose();
   return { wasm, functions };
 }
+// Time pass for `asb profile --heaviest=time`.
+//
+// Every defined function whose static weight >= minWeight is outlined: its
+// body moves to `<name>$tprof_inner` and a wrapper takes the original name,
+// so exports, element segments (call_indirect — bench callbacks are function
+// refs), and direct calls all flow through timing without any body surgery.
+//
+// Accounting (exact self-time, recursion-safe — see PLAN.md):
+//   shared globals  __tprof_child (ns of direct wrapped callees in the
+//                   current frame), __tprof_ccg (their call count)
+//   per function k  __tprof_s_<k> self ns, __tprof_i_<k> inclusive ns,
+//                   __tprof_c_<k> calls, __tprof_cc_<k> direct child calls,
+//                   __tprof_d_<k> live depth (not exported)
+//
+//   wrapper: t0 = tnow(); save child/ccg in locals; zero them; depth++
+//            r = call $inner(...)
+//            dur = tnow() - t0
+//            self += dur - child; cc += ccg; depth--
+//            if depth == 0: incl += dur            (outermost frame only)
+//            child = saved_child + dur; ccg = saved_ccg + 1
+//
+// `self` subtracts direct wrapped callees → exact self-time; the depth gate
+// keeps recursive inclusive time from multi-counting. Per-frame state lives
+// in wrapper locals, so the real call stack is the bookkeeping stack. Traps
+// leak one frame (the run is over anyway).
+//
+// Overhead is measured, not guessed: `__tprof_calib` is an empty wrapped
+// function and `__tprof_calib_run(n)` calls it n times in-wasm, returning
+// the elapsed ns. The host derives the inside-window cost (calib's own
+// self/n, charged to each wrapped function per call) and the outside-window
+// remainder (charged to callers per child call) and subtracts both.
+export async function instrumentTimeWasm(input, minWeight) {
+  const binaryen = await loadBinaryen();
+  const module = binaryen.readBinary(input);
+  module.setFeatures(binaryen.Features.All);
+  const raw = binaryen;
+  const modPtr = module.ptr;
+  const ZERO_WEIGHT = new Set([binaryen.BlockId, binaryen.LoopId, binaryen.NopId]);
+  const childRefs = (info) => {
+    if (info.id === binaryen.ConstId) return [];
+    const out = [];
+    for (const key of ["children", "operands", "condition", "ifTrue", "ifFalse", "body", "value", "left", "right", "ptr", "target", "dest", "source", "size", "delta"]) {
+      const v = info[key];
+      if (typeof v === "number" && v !== 0) out.push(v);
+      else if (Array.isArray(v)) for (const c of v) if (typeof c === "number" && c !== 0) out.push(c);
+    }
+    return out;
+  };
+  // total static weight of a body — same node≈instruction model as the
+  // instr pass, but flat (regions don't matter here)
+  const weigh = (ref) => {
+    if (raw._BinaryenExpressionGetId(ref) === binaryen.UnreachableId) return 1;
+    const x = binaryen.getExpressionInfo(ref);
+    let w = ZERO_WEIGHT.has(x.id) ? 0 : 1;
+    for (const child of childRefs(x)) w += weigh(child);
+    return w;
+  };
+  const i64 = binaryen.i64;
+  const i32 = binaryen.i32;
+  const i64const = (v) => module.i64.const(v);
+  const NOW = "__tprof_now";
+  const CHILD = "__tprof_child";
+  const CCG = "__tprof_ccg";
+  const SCG = "__tprof_scg"; // wrapped calls in the current frame's subtree
+  module.addFunctionImport(NOW, "__asbench", "tnow", binaryen.none, i64);
+  module.addGlobal(CHILD, i64, true, i64const(0n));
+  module.addGlobal(CCG, i64, true, i64const(0n));
+  module.addGlobal(SCG, i64, true, i64const(0n));
+  const addToGlobal = (g, v) => module.global.set(g, module.i64.add(module.global.get(g, i64), v));
+  const wrapFunction = (k, name, innerName, params, results) => {
+    const cG = `__tprof_c_${k}`;
+    const sG = `__tprof_s_${k}`;
+    const iG = `__tprof_i_${k}`;
+    const ccG = `__tprof_cc_${k}`;
+    const iscG = `__tprof_isc_${k}`; // subtree calls under outermost frames (corrects incl)
+    const dG = `__tprof_d_${k}`;
+    for (const g of [cG, sG, iG, ccG, iscG]) {
+      module.addGlobal(g, i64, true, i64const(0n));
+      module.addGlobalExport(g, g);
+    }
+    module.addGlobal(dG, i32, true, module.i32.const(0));
+    const paramTypes = binaryen.expandType(params);
+    const P = paramTypes.length;
+    const hasResult = results !== binaryen.none;
+    // locals: T0 doubles as t0 then dur; SAVED*/RES carry per-frame state
+    const T0 = P;
+    const SAVED = P + 1;
+    const SAVEDCC = P + 2;
+    const SAVEDSC = P + 3;
+    const RES = P + 4;
+    const vars = [i64, i64, i64, i64];
+    if (hasResult) vars.push(results);
+    const dur = () => module.local.get(T0, i64);
+    const callInner = module.call(
+      innerName,
+      paramTypes.map((t, j) => module.local.get(j, t)),
+      results,
+    );
+    const body = [
+      module.local.set(T0, module.call(NOW, [], i64)),
+      module.local.set(SAVED, module.global.get(CHILD, i64)),
+      module.local.set(SAVEDCC, module.global.get(CCG, i64)),
+      module.local.set(SAVEDSC, module.global.get(SCG, i64)),
+      module.global.set(CHILD, i64const(0n)),
+      module.global.set(CCG, i64const(0n)),
+      module.global.set(SCG, i64const(0n)),
+      addToGlobal(cG, i64const(1n)),
+      module.global.set(dG, module.i32.add(module.global.get(dG, i32), module.i32.const(1))),
+      hasResult ? module.local.set(RES, callInner) : callInner,
+      module.local.set(T0, module.i64.sub(module.call(NOW, [], i64), module.local.get(T0, i64))), // T0 := dur
+      addToGlobal(sG, module.i64.sub(dur(), module.global.get(CHILD, i64))),
+      addToGlobal(ccG, module.global.get(CCG, i64)),
+      module.global.set(dG, module.i32.sub(module.global.get(dG, i32), module.i32.const(1))),
+      // outermost frame: bank inclusive time and the subtree call count
+      // (scg + 1 = descendants + me) that corrects it at render time
+      module.if(module.i32.eqz(module.global.get(dG, i32)), module.block(null, [addToGlobal(iG, dur()), addToGlobal(iscG, module.i64.add(module.global.get(SCG, i64), i64const(1n)))])),
+      module.global.set(CHILD, module.i64.add(module.local.get(SAVED, i64), dur())),
+      module.global.set(CCG, module.i64.add(module.local.get(SAVEDCC, i64), i64const(1n))),
+      module.global.set(SCG, module.i64.add(module.local.get(SAVEDSC, i64), module.i64.add(module.global.get(SCG, i64), i64const(1n)))),
+    ];
+    if (hasResult) body.push(module.local.get(RES, results));
+    module.addFunction(name, params, results, vars, module.block(null, body, hasResult ? results : binaryen.none));
+  };
+  const targets = [];
+  let skipped = 0;
+  const numFns = raw._BinaryenGetNumFunctions(modPtr);
+  for (let i = 0; i < numFns; i++) {
+    const info = binaryen.getFunctionInfo(raw._BinaryenGetFunctionByIndex(modPtr, i));
+    if (!info.body) continue; // imported
+    if (binaryen.expandType(info.results).length > 1) continue; // multivalue: can't forward through one RES local
+    if (weigh(info.body) < minWeight) {
+      skipped++;
+      continue;
+    }
+    targets.push({ name: info.name, params: info.params, results: info.results, vars: info.vars, body: info.body });
+  }
+  const functions = [];
+  for (const t of targets) {
+    const k = functions.length;
+    functions.push({ k, name: t.name });
+    const innerName = `${t.name}$tprof_inner`;
+    // move the body (expressions are module-arena-owned; the remove/re-add
+    // under the same name keeps exports, element segments, and direct calls
+    // pointing at the wrapper)
+    module.addFunction(innerName, t.params, t.results, t.vars, t.body);
+    module.removeFunction(t.name);
+    wrapFunction(k, t.name, innerName, t.params, t.results);
+  }
+  // calibration: empty wrapped function + in-wasm driver returning elapsed ns
+  const calibK = functions.length;
+  module.addFunction("__tprof_calib$tprof_inner", binaryen.none, binaryen.none, [], module.nop());
+  wrapFunction(calibK, "__tprof_calib", "__tprof_calib$tprof_inner", binaryen.none, binaryen.none);
+  module.addFunctionExport("__tprof_calib", "__tprof_calib");
+  {
+    const T0 = 1; // param n = 0
+    const I = 2;
+    const body = module.block(null, [module.local.set(T0, module.call(NOW, [], i64)), module.block("tprof_out", [module.loop("tprof_loop", module.block(null, [module.br("tprof_out", module.i32.ge_u(module.local.get(I, i32), module.local.get(0, i32))), module.call("__tprof_calib", [], binaryen.none), module.local.set(I, module.i32.add(module.local.get(I, i32), module.i32.const(1))), module.br("tprof_loop")]))]), module.i64.sub(module.call(NOW, [], i64), module.local.get(T0, i64))], i64);
+    module.addFunction("__tprof_calib_run", binaryen.createType([i32]), i64, [i64, i32], body);
+    module.addFunctionExport("__tprof_calib_run", "__tprof_calib_run");
+  }
+  if (!module.validate()) {
+    throw new Error("time-instrumented module failed binaryen validation");
+  }
+  const wasm = module.emitBinary();
+  module.dispose();
+  return { wasm, functions, calibK, skipped };
+}

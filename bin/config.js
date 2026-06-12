@@ -15,7 +15,7 @@ const DEFAULTS = {
   settings: {},
   render: { significanceLevel: 0.05, noiseThreshold: 0.01 },
   buildOptions: { optimize: true, debug: false, args: [] },
-  profile: { top: 10, all: false },
+  profile: { top: 10, all: false, iters: 10, minInstrs: 4 },
 };
 export const DEFAULT_CONFIG_PATH = "as-bench.config.json";
 const SAMPLING_MODES = ["auto", "linear", "flat"];
@@ -100,6 +100,8 @@ function validate(cfg, where) {
   if (cfg.render?.noiseThreshold !== undefined) checkNumber(cfg.render.noiseThreshold, `${where}render.noiseThreshold`, 0);
   if (cfg.buildOptions?.args !== undefined && (!Array.isArray(cfg.buildOptions.args) || cfg.buildOptions.args.some((a) => typeof a !== "string"))) fail(`${where}buildOptions.args must be an array of strings`);
   if (cfg.profile?.top !== undefined) checkNumber(cfg.profile.top, `${where}profile.top`, 1);
+  if (cfg.profile?.iters !== undefined) checkNumber(cfg.profile.iters, `${where}profile.iters`, 1);
+  if (cfg.profile?.minInstrs !== undefined) checkNumber(cfg.profile.minInstrs, `${where}profile.minInstrs`, 0);
 }
 /** Overlay partial config b onto a: objects merge one level deep, scalars/arrays replace. */
 function overlay(base, cfg) {

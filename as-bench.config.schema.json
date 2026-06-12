@@ -151,6 +151,18 @@
           "type": "boolean",
           "default": false,
           "description": "Include engine/runtime-internal rows in profile tables."
+        },
+        "iters": {
+          "type": "number",
+          "minimum": 1,
+          "default": 10,
+          "description": "--heaviest=time iterations per bench (more beats clock granularity; percentages and per-call values are iteration-independent)."
+        },
+        "minInstrs": {
+          "type": "number",
+          "minimum": 0,
+          "default": 4,
+          "description": "--heaviest=time skips wrapping functions whose static weight is under this many instructions; their time folds into callers. 0 wraps everything."
         }
       }
     },

@@ -310,12 +310,14 @@ export function runBench(name: string, routine: () => void): void {
   const warmupTolerance = host.tune(6, settings.warmupTolerance);
   const warmupMinTime = host.tune(7, settings.warmupMinTime);
 
-  // profile mode (host-only, tune kind 8): run the routine exactly once and
-  // report nothing — instruction counters in an instrumented build do the
-  // measuring. Early return keeps engine allocations out of the counted
-  // window (host snapshots counters at benchStart/benchEnd).
-  if (<i32>host.tune(8, 0) != 0) {
-    routine();
+  // profile mode (host-only, tune kind 8): value = iteration count. Run the
+  // routine exactly that many times and report nothing — counters/timers in
+  // an instrumented build do the measuring (=instr passes 1; =time passes
+  // more to beat clock granularity). Early return keeps engine allocations
+  // out of the counted window (host snapshots at benchStart/benchEnd).
+  const profileIters = <i32>host.tune(8, 0);
+  if (profileIters != 0) {
+    for (let i: i32 = 0; i < profileIters; i++) routine();
     host.benchEnd();
     return;
   }

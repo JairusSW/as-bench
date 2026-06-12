@@ -114,8 +114,10 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
    `as-bench.config.json` + schema, `--config`/`--mode`, precedence
    defaults < config < mode < flags; `asb init` scaffolds. Remaining:
    browsers, node:bindings target.
-6. **`--heaviest=time`** — design settled (2026-06-12), see below.
-   `--heaviest=instr` covers exact attribution meanwhile.
+6. ~~**`--heaviest=time`**~~ — done (2026-06-12), design below (as built).
+   Validated: thrash/sumLoop split 84%/16% by time vs 80%/20% by instrs
+   (memory-bound code costs more per instruction — the point of the mode);
+   recursive fib reports incl ≈ self (depth gating + subtree correction).
 
 ## Design: `profile --heaviest=time` (2026-06-12)
 
@@ -124,17 +126,23 @@ Per-function wall-time with **exact self-time** (recursion-safe) and
 subtraction. No shadow stack in memory; the real call stack carries the
 bookkeeping in wrapper locals.
 
-**Accounting.** One shared mutable i64 global `__tprof_child`; per function
-`k`: exported `__tprof_self_<k>` (i64 ns), `__tprof_incl_<k>` (i64 ns),
-`__tprof_d_<k>` (i32 depth). Wrapper for `k`:
+**Accounting.** Shared mutable i64 globals `__tprof_child` (ns of direct
+wrapped callees in the current frame), `__tprof_ccg` (their call count), and
+`__tprof_scg` (wrapped calls in the frame's whole subtree); per function `k`:
+exported `__tprof_s_<k>` self ns, `__tprof_i_<k>` inclusive ns, `__tprof_c_<k>`
+calls, `__tprof_cc_<k>` direct child calls, `__tprof_isc_<k>` subtree calls
+under outermost frames, internal `__tprof_d_<k>` depth. Wrapper for `k`:
 
 ```
-t0 = tnow(); saved = child; child = 0; d_k += 1
+t0 = tnow(); save child/ccg/scg in locals; zero them; c_k += 1; d_k += 1
 r  = call $k$inner(...args)
 dur = tnow() - t0
 self_k += dur - child          ; subtract direct instrumented callees → self
-d_k -= 1; if d_k == 0: incl_k += dur   ; outermost frame only → no recursion double-count
-child = saved + dur            ; my whole duration is child-time to MY caller
+cc_k += ccg                    ; child-call count → caller-side overhead correction
+d_k -= 1
+if d_k == 0: incl_k += dur; isc_k += scg + 1   ; outermost only → no recursion double-count
+child = saved_child + dur      ; my whole duration is child-time to MY caller
+ccg = saved_ccg + 1; scg = saved_scg + scg + 1
 return r
 ```
 
@@ -155,18 +163,27 @@ pointer-to-memory result, which would need scratch memory the AS bump
 allocator doesn't know to avoid. =time is node-only for now; external
 runtimes would need the wasi-clock + reserved-scratch variant (future).
 
-**Overhead control & correction:**
+**Overhead control & correction (as built):**
 - ~2 host clock calls + 1 extra frame per call ≈ O(100ns)/call — fatal for
-  nano-functions if uncorrected. The pass also injects an exported empty
-  wrapped function `__tprof_calib`; the host calls it ~100k times, derives
-  per-call overhead, and subtracts `calls_k × overhead` per function
-  (floor 0). Render notes "overhead-corrected".
-- `--min-instrs <w>` (default ~16): reuse the instr pass's static region
-  weights to **skip wrapping trivial functions** (accessors etc.) — their
-  time folds into callers, slashing call volume. `--min-instrs 0` wraps all.
-- `--iters <n>` (default 10): new tune kind (next free: 10) loops the routine
-  n times in profileMode; percentages are n-independent, per-call divides.
-  Single-run times are clock-granularity noise for short routines.
+  nano-functions if uncorrected. The pass injects an empty wrapped
+  `__tprof_calib` plus an in-wasm driver `__tprof_calib_run(n) -> ns`
+  (host-loop timing would add JS-boundary cost wasm→wasm calls don't pay).
+  Two components: calib's own self/n = inside-window cost (charged to each
+  wrapped fn per call), driver total/n minus that = outside-window cost
+  (charged to CALLERS per child call — that's what `cc_k` exists for). The
+  render subtracts `calls_k×oIn + cc_k×oOut` from self and `isc_k×(oIn+oOut)`
+  from incl, floor 0. Calibration runs per bench at benchStart AND benchEnd
+  (re-entrant export call before the snapshot, averaged) — wrappers tier up
+  under V8 during the run, so a single post-run estimate over-corrects early
+  benches.
+- `--min-instrs <w>` (default 4): reuse the static node-weight model to
+  **skip wrapping trivial functions** (accessors etc.) — their time folds
+  into callers, slashing call volume. (16 was the draft default; fib's whole
+  body weighs ~13 — too aggressive.) `--min-instrs 0` wraps all.
+- `--iters <n>` (default 10): tune kind 8's value IS the iteration count now
+  (1 = the old profileMode flag, =instr passes 1 — no new kind needed);
+  percentages are n-independent, per-call divides. Single-run times are
+  clock-granularity noise for short routines.
 
 **Render:** per bench — total, then `%self  self  incl  calls  self/call
 name`, sorted by self, `isInternal` filter as in =instr. Caveat line: =time
@@ -181,10 +198,14 @@ suits functions ≥ ~1µs self; below that =instr is the honest tool.
 4. a memory-thrashing bench where time% ≠ instr% (cache misses) — the
    feature's reason to exist.
 
-**Steps:** (1) `instrumentTime()` in cli/instrument.ts (outline pass: rename,
-wrapper, exports + elem segments, calib fn); (2) `tnow` in benchImports;
-(3) engine profileIters tune (kind 10); (4) cli/profile.ts =time branch:
-instrument → run → calibrate → corrected table; (5) changelog + caveats.
+**Steps (all done):** (1) `instrumentTimeWasm()` in cli/instrument.ts — no
+binaryen rename API exists, so the "outline" is move-body: `addFunction`
+($inner with the original body — expressions are module-arena-owned),
+`removeFunction`, re-`addFunction` under the original name with the wrapper
+body; exports/elem segments/direct calls follow the name with zero rewriting;
+(2) `tnow` supplied in profile.ts's import object (`hrtime.bigint()`);
+(3) engine tune kind 8 = iteration count; (4) cli/profile.ts =time branch:
+instrument → run (per-bench calibrate) → corrected table; (5) changelog.
 
 ## Attribution
 

@@ -33,11 +33,14 @@ ${chalk.bold("Commands")}
                         also configurable as runOptions.runtime.cmd
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
-  profile             Tier-free work profile: wasm instruction counts per call
-    --heaviest=instr    Rank functions by executed instruction count (default)
-    --heaviest=time     Rank by per-function wall-clock (not yet implemented)
+  profile             Per-function work profile (instruction counts or wall-clock)
+    --heaviest=instr    Rank functions by executed instruction count (default, exact)
+    --heaviest=time     Rank by wall-clock self time (overhead-corrected, recursion-safe)
     --top <n>           Rows per bench (default 10)
     --all               Include engine/runtime-internal rows
+    --iters <n>         (time) Iterations per bench (default 10)
+    --min-instrs <w>    (time) Don't wrap functions under w static instructions —
+                        their time folds into callers (default 4)
   init                Scaffold as-bench.config.json + an example bench (--force overwrites)
 
 ${chalk.bold("Configuration")} (run/build/profile)

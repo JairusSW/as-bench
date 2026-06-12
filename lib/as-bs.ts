@@ -39,7 +39,7 @@ export interface TuneOverrides {
   confidenceLevel?: number;
   warmupTolerance?: number; // relative met drift considered stable; 0 = fixed-time warmup
   warmupMinTime?: number; // never judge stability before this many ms
-  profileMode?: number; // 1 = run each routine exactly once, no statistics
+  profileMode?: number; // N >= 1 = run each routine exactly N times, no statistics
   deterministic?: number; // 1 = record host imports on iteration 2, replay after
 }
 
