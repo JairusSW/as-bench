@@ -1,3 +1,5 @@
+import { DeterministicHarness } from "./replay.js";
+export { DeterministicHarness } from "./replay.js";
 export type RuntimeTarget = "bindings" | "wasi";
 export declare function now(): number;
 export declare enum EstimateKind {
@@ -17,6 +19,7 @@ export interface TuneOverrides {
     warmupTolerance?: number;
     warmupMinTime?: number;
     profileMode?: number;
+    deterministic?: number;
 }
 export interface BaselineSample {
     iters: ArrayLike<number>;
@@ -41,7 +44,7 @@ export interface BenchReporter {
     getBaseline?(key: string, sampleCount: number): BaselineSample | undefined;
     change?(lb: number, point: number, hb: number, pValue: number): void;
 }
-export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides): WebAssembly.ModuleImports;
+export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides, harness?: DeterministicHarness | null): WebAssembly.ModuleImports;
 export declare function runBenchFile(wasmPath: string, reporter?: BenchReporter, tunes?: TuneOverrides, extraImports?: WebAssembly.Imports): Promise<void>;
 export declare function defaultImports(): WebAssembly.Imports;
 export declare function instantiate(imports?: WebAssembly.Imports): Promise<WebAssembly.Instance>;

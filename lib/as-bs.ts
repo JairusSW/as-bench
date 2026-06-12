@@ -5,6 +5,9 @@
 // (`tune`), and the reporting channel — plus, later, the record/replay glue.
 
 import fs from "node:fs";
+import { DeterministicHarness } from "./replay.js";
+
+export { DeterministicHarness } from "./replay.js";
 
 export type RuntimeTarget = "bindings" | "wasi";
 
@@ -37,9 +40,10 @@ export interface TuneOverrides {
   warmupTolerance?: number; // relative met drift considered stable; 0 = fixed-time warmup
   warmupMinTime?: number; // never judge stability before this many ms
   profileMode?: number; // 1 = run each routine exactly once, no statistics
+  deterministic?: number; // 1 = record host imports on iteration 2, replay after
 }
 
-const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime", "profileMode"];
+const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime", "profileMode", "deterministic"];
 
 /** A saved benchmark sample: parallel per-sample iteration counts and times (ms). */
 export interface BaselineSample {
@@ -98,7 +102,7 @@ function readString(memory: WebAssembly.Memory, ptr: number, len: number): strin
  * a thunk resolved at call time (the instance doesn't exist yet when imports
  * are constructed, and `memory.buffer` detaches on grow).
  */
-export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}): WebAssembly.ModuleImports {
+export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, harness: DeterministicHarness | null = null): WebAssembly.ModuleImports {
   // Track the current suite/bench so key-addressed callbacks (sampleDone,
   // getBaseline) don't require every reporter to re-derive labels.
   let suiteName: string | null = null;
@@ -119,13 +123,22 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
     warmupStarted: (ms: number) => reporter.warmupStarted?.(ms),
     warmupEnded: (elapsed: number, met: number, converged: number) => reporter.warmupEnded?.(elapsed, met, converged !== 0),
     measureStarted: (est: number, iters: number, samples: number) => reporter.measureStarted?.(est, iters, samples),
-    analyzing: () => reporter.analyzing?.(),
+    analyzing: () => {
+      // measurement is over — the engine's analysis (bootstrap → Math.random
+      // → wasi random_get seeding) must hit live imports again
+      harness?.reset();
+      reporter.analyzing?.();
+    },
     faultyConfig: (linear: number, actualMs: number, rec: number) => reporter.faultyConfig?.(linear !== 0, actualMs, rec),
     faultyBenchmark: () => reporter.faultyBenchmark?.(),
     estimate: (kind: number, lb: number, point: number, hb: number) => reporter.estimate?.(kind, lb, point, hb),
     result: (lb: number, point: number, hb: number) => reporter.result?.(lb, point, hb),
     outliers: (los: number, lom: number, him: number, his: number) => reporter.outliers?.(los, lom, him, his),
-    benchEnd: () => reporter.benchEnd?.(),
+    benchEnd: () => {
+      harness?.reset();
+      reporter.benchEnd?.();
+    },
+    iter: () => harness?.iter(),
     suiteStart: (ptr: number, len: number) => {
       suiteName = readString(getMem(), ptr, len);
       reporter.suiteStart?.(suiteName);
@@ -167,11 +180,20 @@ export async function runBenchFile(wasmPath: string, reporter: BenchReporter = {
   let instance: WebAssembly.Instance;
   const getMem = () => instance.exports.memory as WebAssembly.Memory;
 
+  // Deterministic mode: wrap every function import OUTSIDE __asbench (the
+  // engine's control/timing channel stays passthrough) in the record/replay
+  // harness. The engine must announce iterations (tunes.deterministic also
+  // flows to the wasm via tune kind 9).
+  const harness = tunes.deterministic === 1 ? new DeterministicHarness(getMem) : null;
+  const wrapNs = (ns: string, mod: WebAssembly.ModuleImports): WebAssembly.ModuleImports => (harness ? harness.wrapNamespace(ns, mod) : mod);
+
   const imports: WebAssembly.Imports = {
-    wasi_snapshot_preview1: wasi.wasiImport,
-    __asbench: benchImports(getMem, reporter, tunes),
-    ...extraImports,
+    wasi_snapshot_preview1: wrapNs("wasi_snapshot_preview1", wasi.wasiImport as unknown as WebAssembly.ModuleImports),
+    __asbench: benchImports(getMem, reporter, tunes, harness),
   };
+  for (const ns of Object.keys(extraImports)) {
+    imports[ns] = ns === "__asbench" ? extraImports[ns] : wrapNs(ns, extraImports[ns]);
+  }
 
   const module = await WebAssembly.compile(bytes as BufferSource);
   instance = await WebAssembly.instantiate(module, imports);

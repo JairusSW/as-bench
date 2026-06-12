@@ -13,7 +13,8 @@ export declare function now(): f64;
  * in-wasm value; the host returns either an override (CLI flag) or the value
  * unchanged. Kinds: 0 warmupTime, 1 measurementTime, 2 sampleSize,
  * 3 numResamples, 4 samplingMode, 5 confidenceLevel, 6 warmupTolerance,
- * 7 warmupMinTime, 8 profileMode (host-only; 1 = run routine once, no stats).
+ * 7 warmupMinTime, 8 profileMode (host-only; 1 = run routine once, no stats),
+ * 9 deterministic (host-only; 1 = signal each routine invocation via iter()).
  */
 // @ts-ignore: decorator
 @external("__asbench", "tune")
@@ -26,6 +27,14 @@ export declare function benchStart(ptr: usize, len: i32): void;
 // @ts-ignore: decorator
 @external("__asbench", "warmupStarted")
 export declare function warmupStarted(durationMs: f64): void;
+
+/**
+ * Deterministic mode: fired before every routine invocation so the host's
+ * record/replay harness can manage tape boundaries.
+ */
+// @ts-ignore: decorator
+@external("__asbench", "iter")
+export declare function iter(): void;
 
 /** Warmup finished; converged=1 when met stabilized before the time cap. */
 // @ts-ignore: decorator

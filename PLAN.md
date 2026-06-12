@@ -90,8 +90,16 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
 2b. ~~**Baseline persistence**~~ — done. `--save-baseline <id>` /
    `--baseline <id>`; raw samples in `.as-bench/baselines/<id>.json`;
    pull-based `loadBaseline` host hook feeds the engine's existing compare().
-3. **Port `replay/`** verbatim; wire into `lib/as-bs.ts` as deterministic mode;
-   add the passthrough exclude-set + auto-rewind; de-risk heap-drift.
+3. ~~**Deterministic mode**~~ — done (`lib/replay.ts`), with a design change
+   from the original two-phase plan: recording happens IN-PROCESS during the
+   measured run (live iter 1 for lazy inits → record iter 2 → replay iter 3+,
+   signaled by the engine's `iter()` import), so record and replay share one
+   memory layout and the heap-drift risk collapses into loud divergence
+   errors (pointer-arg mismatch). `__asbench` is the passthrough exclude-set;
+   `AS_BENCH_DETERMINISTIC` builds time via host.now so the WASI clock is
+   recordable; `analyzing()` returns the harness to live for the engine's own
+   bootstrap randomness. The playground branch's binary tape format
+   (sha-bound, on-disk) remains future work for cross-runtime replay oracles.
 4. ~~**Instrumentation pass** → `profile --heaviest=instr`~~ — done (lives in
    `cli/instrument.ts` as a post-compile binaryen.js pass, not an asc
    transform; binaryen resolved from the installed assemblyscript's pin).

@@ -24,6 +24,8 @@ ${chalk.bold("Commands")}
     --confidence <x>    Confidence level (default 0.95)
     --save-baseline <id>  Save this run's samples as a named baseline
     --baseline <id>     Compare each bench against a saved baseline
+    --deterministic     Record host imports once (iteration 2), replay them for
+                        every later iteration — neutralizes host nondeterminism
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
   profile             Tier-free work profile: wasm instruction counts per call

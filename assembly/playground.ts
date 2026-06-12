@@ -104,6 +104,14 @@ suite("sort 200 i32s", () => {
   });
 });
 
+// --- host nondeterminism: Date.now goes through wasi clock_time_get ------------
+// Under --deterministic the recorded timestamp (and the shim's tempbuf memory
+// write) is served from the tape on every iteration after the second.
+
+bench("Date.now", () => {
+  blackbox<i64>(Date.now());
+});
+
 // --- suite at the noise floor: identical-cost ops ------------------------------
 // add vs mul should report "no change" — a good check that the renderer's
 // noise-threshold handling keeps statistical significance honest.

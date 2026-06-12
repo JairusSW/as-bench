@@ -21,6 +21,11 @@ import { Settings, SamplingMode } from "./types";
 // @ts-ignore: decorator
 @inline
 function timeNow(): f64 {
+  // Deterministic builds route engine timing through the (passthrough) host
+  // import so the WASI clock stays recordable for user code (Date.now etc).
+  if (isDefined(AS_BENCH_DETERMINISTIC)) {
+    return host.now();
+  }
   if (isDefined(ASC_WASI)) {
     return performance.now();
   }
@@ -315,6 +320,12 @@ export function runBench(name: string, routine: () => void): void {
     return;
   }
 
+  // deterministic mode (host-only, tune kind 9): announce every routine
+  // invocation so the host's record/replay harness can segment iterations.
+  // The iter() import call is inside the timed window — constant overhead
+  // per iteration; compare deterministic runs only with deterministic runs.
+  const deterministic = <i32>host.tune(9, 0) != 0;
+
   cfgSampleSize = sampleSize;
   cfgNumResamples = numResamples;
   ensureBuffers(sampleSize, numResamples);
@@ -343,6 +354,7 @@ export function runBench(name: string, routine: () => void): void {
     let start = timeNow();
 
     for (let i: u64 = 0; i < warmupIters; ++i) {
+      if (deterministic) host.iter();
       routine();
     }
 
@@ -405,6 +417,7 @@ export function runBench(name: string, routine: () => void): void {
 
     const iters = mIters[i];
     for (let j: u64 = 0; j < iters; ++j) {
+      if (deterministic) host.iter();
       routine();
     }
 

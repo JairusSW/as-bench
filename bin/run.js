@@ -44,7 +44,8 @@ export function parseRunFlags(args) {
     } else if (a === "--baseline") {
       baseline = args[++i];
       if (!baseline || baseline.startsWith("-")) throw new Error("--baseline expects an id");
-    } else if (a === "--verbose" || a === "-V") verbose = true;
+    } else if (a === "--deterministic") tunes.deterministic = 1;
+    else if (a === "--verbose" || a === "-V") verbose = true;
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else selectors.push(a);
   }
@@ -74,9 +75,9 @@ function resolveWasiShimConfig() {
   // is absolute; hand it a cwd-relative path instead.
   return path.relative(process.cwd(), resolved);
 }
-export async function buildBenchFile(file, extraArgs = []) {
+export async function buildBenchFile(file, extraArgs = [], outSuffix = "") {
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const outWasm = path.join(OUT_DIR, path.basename(file).replace(/\.ts$/, ".wasm"));
+  const outWasm = path.join(OUT_DIR, path.basename(file).replace(/\.ts$/, `${outSuffix}.wasm`));
   const asc = await import("assemblyscript/dist/asc.js");
   const argv = [file, "--transform", path.join(PKG_ROOT, "transform/lib/index.js"), "--config", resolveWasiShimConfig(), "--outFile", outWasm, "--optimize", ...extraArgs];
   const { error, stderr } = await asc.main(argv);
@@ -246,9 +247,12 @@ export async function executeRun(args) {
   const loaded = flags.baseline ? loadBaselineFile(flags.baseline) : null;
   const collected = {};
   const sizeMismatchWarned = new Set();
+  const deterministic = flags.tunes.deterministic === 1;
   for (const file of files) {
-    console.log(chalk.dim(`compiling ${file}`));
-    const wasmPath = await buildBenchFile(file);
+    console.log(chalk.dim(`compiling ${file}${deterministic ? " (deterministic)" : ""}`));
+    // deterministic builds route engine timing through the passthrough host
+    // import so the WASI clock stays recordable for user code
+    const wasmPath = deterministic ? await buildBenchFile(file, ["--use", "AS_BENCH_DETERMINISTIC=1"], ".det") : await buildBenchFile(file);
     if (flags.buildOnly) {
       console.log(chalk.dim(`built ${wasmPath}`));
       continue;
