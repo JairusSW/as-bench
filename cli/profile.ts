@@ -240,11 +240,22 @@ interface AllocRow {
   selfBytes: bigint;
   inclBytes: bigint; // outermost frames only
   allocs: bigint;
+  selfPages: bigint; // linear-memory pages grown while this function's frames were live
+}
+
+interface AllocKinds {
+  bytes: bigint; // all bytes claimed (chokepoint)
+  allocs: bigint;
+  managedBytes: bigint; // __new payload sizes, headers excluded
+  managedAllocs: bigint;
+  reallocBytes: bigint; // tlsf reallocateBlock requested sizes
+  reallocs: bigint;
 }
 
 interface BenchAllocProfile {
   key: string;
   rows: AllocRow[];
+  kinds: AllocKinds;
   /** Linear-memory pages grown during the bench window. */
   pagesGrown: number;
 }
@@ -258,13 +269,22 @@ async function runAllocProfiled(wasmPath: string, functions: ProfiledFunction[],
   let instance: WebAssembly.Instance;
   const getMem = () => instance!.exports.memory as WebAssembly.Memory;
 
-  const snapshot = (): { c: bigint[]; sb: bigint[]; ib: bigint[]; sa: bigint[] } => {
+  const snapshot = (): { c: bigint[]; sb: bigint[]; ib: bigint[]; sa: bigint[]; sp: bigint[]; kinds: AllocKinds } => {
     const exp = instance!.exports as Record<string, WebAssembly.Global>;
     return {
       c: functions.map((f) => exp[`__aprof_c_${f.k}`].value as bigint),
       sb: functions.map((f) => exp[`__aprof_sb_${f.k}`].value as bigint),
       ib: functions.map((f) => exp[`__aprof_ib_${f.k}`].value as bigint),
       sa: functions.map((f) => exp[`__aprof_sa_${f.k}`].value as bigint),
+      sp: functions.map((f) => exp[`__aprof_sp_${f.k}`].value as bigint),
+      kinds: {
+        bytes: exp.__aprof_b.value as bigint,
+        allocs: exp.__aprof_a.value as bigint,
+        managedBytes: exp.__aprof_mb.value as bigint,
+        managedAllocs: exp.__aprof_ma.value as bigint,
+        reallocBytes: exp.__aprof_rb.value as bigint,
+        reallocs: exp.__aprof_rc.value as bigint,
+      },
     };
   };
 
@@ -292,11 +312,20 @@ async function runAllocProfiled(wasmPath: string, functions: ProfiledFunction[],
         if (calls === 0n) continue;
         const selfBytes = end.sb[i] - started.sb[i];
         const inclBytes = end.ib[i] - started.ib[i];
-        if (selfBytes === 0n && inclBytes === 0n) continue; // nothing allocated under it
-        rows.push({ name: functions[i].name, calls, selfBytes, inclBytes, allocs: end.sa[i] - started.sa[i] });
+        const selfPages = end.sp[i] - started.sp[i];
+        if (selfBytes === 0n && inclBytes === 0n && selfPages === 0n) continue; // nothing allocated under it
+        rows.push({ name: functions[i].name, calls, selfBytes, inclBytes, allocs: end.sa[i] - started.sa[i], selfPages });
       }
       rows.sort((a, b) => (b.selfBytes > a.selfBytes ? 1 : b.selfBytes < a.selfBytes ? -1 : 0));
-      profiles.push({ key: suiteName !== null ? `${suiteName}/${benchName}` : benchName, rows, pagesGrown });
+      const kinds: AllocKinds = {
+        bytes: end.kinds.bytes - started.kinds.bytes,
+        allocs: end.kinds.allocs - started.kinds.allocs,
+        managedBytes: end.kinds.managedBytes - started.kinds.managedBytes,
+        managedAllocs: end.kinds.managedAllocs - started.kinds.managedAllocs,
+        reallocBytes: end.kinds.reallocBytes - started.kinds.reallocBytes,
+        reallocs: end.kinds.reallocs - started.kinds.reallocs,
+      };
+      profiles.push({ key: suiteName !== null ? `${suiteName}/${benchName}` : benchName, rows, kinds, pagesGrown });
       started = null;
     },
   };
@@ -324,18 +353,27 @@ function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, a
   for (const p of profiles) {
     let total = 0n;
     for (const r of p.rows) total += r.selfBytes;
-    const grown = p.pagesGrown > 0 ? chalk.dim(` · memory +${p.pagesGrown} pages (${formatBytes(p.pagesGrown * 65536)})`) : "";
-    console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatBytes(Number(total))} allocated${grown}`);
+    const k = p.kinds;
+    // unmanaged = claimed minus managed payloads + their 16 B object headers
+    const unmanaged = k.bytes - k.managedBytes - 16n * k.managedAllocs;
+    const parts: string[] = [];
+    if (k.managedAllocs > 0n) parts.push(`${formatBytes(Number(k.managedBytes))} managed (${formatCount(k.managedAllocs)} objs)`);
+    if (unmanaged > 0n) parts.push(`${formatBytes(Number(unmanaged))} unmanaged`);
+    if (k.reallocs > 0n) parts.push(`${formatCount(k.reallocs)} ${k.reallocs === 1n ? "realloc" : "reallocs"} (${formatBytes(Number(k.reallocBytes))} requested)`);
+    if (p.pagesGrown > 0) parts.push(`memory +${p.pagesGrown} pages (${formatBytes(p.pagesGrown * 65536)})`);
+    console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatBytes(Number(total))} allocated${parts.length > 0 ? chalk.dim(" · " + parts.join(" · ")) : ""}`);
     const shown = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
     for (const row of shown.slice(0, top)) {
       const pct = total > 0n ? Number((row.selfBytes * 10000n) / total) / 100 : 0;
       const perCall = row.calls > 0n ? formatBytes(Number(row.selfBytes) / Number(row.calls)) : "-";
-      console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatBytes(Number(row.selfBytes)).padStart(11)} self  ${formatBytes(Number(row.inclBytes)).padStart(11)} incl  ${formatCount(row.allocs).padStart(9)} allocs  ${formatCount(row.calls).padStart(9)} calls  ${perCall.padStart(11)}/call  ${row.name}`);
+      const pages = row.selfPages > 0n ? chalk.dim(`  +${formatCount(row.selfPages)} pages`) : "";
+      console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatBytes(Number(row.selfBytes)).padStart(11)} self  ${formatBytes(Number(row.inclBytes)).padStart(11)} incl  ${formatCount(row.allocs).padStart(9)} allocs  ${formatCount(row.calls).padStart(9)} calls  ${perCall.padStart(11)}/call  ${row.name}${pages}`);
     }
     const hidden = p.rows.length - shown.length;
     if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
   }
   console.log(chalk.dim(`\n  allocation pressure (bytes claimed from the allocator: __new incl. 16 B object header, heap.alloc, realloc moves), not live/peak — GC frees don't subtract.`));
+  console.log(chalk.dim(`  in-place realloc growth shows under reallocs (requested size), not in bytes claimed; page growth attributes to the live frame.`));
   console.log(chalk.dim(`  self excludes wrapped callees; incl counts outermost frames only (recursion-safe).`));
 }
 

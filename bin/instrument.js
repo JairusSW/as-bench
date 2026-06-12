@@ -380,19 +380,34 @@ export async function instrumentAllocWasm(input) {
   const i64 = binaryen.i64;
   const i32 = binaryen.i32;
   const i64const = (v) => module.i64.const(v);
-  const BYTES = "__aprof_b";
+  const BYTES = "__aprof_b"; // all bytes claimed (chokepoint)
   const ALLOCS = "__aprof_a";
+  const MBYTES = "__aprof_mb"; // managed payload bytes (__new sizes, headers excluded)
+  const MALLOCS = "__aprof_ma";
+  const RBYTES = "__aprof_rb"; // realloc requested bytes (tlsf reallocateBlock)
+  const RCOUNT = "__aprof_rc";
   const CHILDB = "__aprof_childb";
   const CHILDA = "__aprof_childa";
-  for (const g of [BYTES, ALLOCS, CHILDB, CHILDA]) module.addGlobal(g, i64, true, i64const(0n));
+  const CHILDP = "__aprof_childp"; // pages grown in wrapped-child frames
+  for (const g of [BYTES, ALLOCS, MBYTES, MALLOCS, RBYTES, RCOUNT, CHILDB, CHILDA, CHILDP]) {
+    module.addGlobal(g, i64, true, i64const(0n));
+  }
+  // bench-level kind summary reads these directly
+  for (const g of [BYTES, ALLOCS, MBYTES, MALLOCS, RBYTES, RCOUNT]) module.addGlobalExport(g, g);
   const addToGlobal = (g, v) => module.global.set(g, module.i64.add(module.global.get(g, i64), v));
+  // pages: memory.size is itself a monotone counter (memory never shrinks),
+  // so page growth gets the same frame algebra as bytes with no grow-site
+  // instrumentation at all — GC- or allocator-triggered memory.grow lands in
+  // whichever wrapped frame was live
+  const memPages = () => module.i64.extend_u(module.memory.size());
   const wrapFunction = (k, name, innerName, params, results) => {
     const cG = `__aprof_c_${k}`;
     const sbG = `__aprof_sb_${k}`;
     const ibG = `__aprof_ib_${k}`;
     const saG = `__aprof_sa_${k}`;
+    const spG = `__aprof_sp_${k}`;
     const dG = `__aprof_d_${k}`;
-    for (const g of [cG, sbG, ibG, saG]) {
+    for (const g of [cG, sbG, ibG, saG, spG]) {
       module.addGlobal(g, i64, true, i64const(0n));
       module.addGlobalExport(g, g);
     }
@@ -400,16 +415,19 @@ export async function instrumentAllocWasm(input) {
     const paramTypes = binaryen.expandType(params);
     const P = paramTypes.length;
     const hasResult = results !== binaryen.none;
-    // locals: B0/A0 double as entry snapshots then frame deltas
+    // locals: B0/A0/P0 double as entry snapshots then frame deltas
     const B0 = P;
     const SAVEDB = P + 1;
     const A0 = P + 2;
     const SAVEDA = P + 3;
-    const RES = P + 4;
-    const vars = [i64, i64, i64, i64];
+    const P0 = P + 4;
+    const SAVEDP = P + 5;
+    const RES = P + 6;
+    const vars = [i64, i64, i64, i64, i64, i64];
     if (hasResult) vars.push(results);
     const durB = () => module.local.get(B0, i64);
     const durA = () => module.local.get(A0, i64);
+    const durP = () => module.local.get(P0, i64);
     const callInner = module.call(
       innerName,
       paramTypes.map((t, j) => module.local.get(j, t)),
@@ -420,19 +438,25 @@ export async function instrumentAllocWasm(input) {
       module.local.set(SAVEDB, module.global.get(CHILDB, i64)),
       module.local.set(A0, module.global.get(ALLOCS, i64)),
       module.local.set(SAVEDA, module.global.get(CHILDA, i64)),
+      module.local.set(P0, memPages()),
+      module.local.set(SAVEDP, module.global.get(CHILDP, i64)),
       module.global.set(CHILDB, i64const(0n)),
       module.global.set(CHILDA, i64const(0n)),
+      module.global.set(CHILDP, i64const(0n)),
       addToGlobal(cG, i64const(1n)),
       module.global.set(dG, module.i32.add(module.global.get(dG, i32), module.i32.const(1))),
       hasResult ? module.local.set(RES, callInner) : callInner,
       module.local.set(B0, module.i64.sub(module.global.get(BYTES, i64), module.local.get(B0, i64))), // B0 := frame bytes
       module.local.set(A0, module.i64.sub(module.global.get(ALLOCS, i64), module.local.get(A0, i64))), // A0 := frame allocs
+      module.local.set(P0, module.i64.sub(memPages(), module.local.get(P0, i64))), // P0 := frame pages grown
       addToGlobal(sbG, module.i64.sub(durB(), module.global.get(CHILDB, i64))),
       addToGlobal(saG, module.i64.sub(durA(), module.global.get(CHILDA, i64))),
+      addToGlobal(spG, module.i64.sub(durP(), module.global.get(CHILDP, i64))),
       module.global.set(dG, module.i32.sub(module.global.get(dG, i32), module.i32.const(1))),
       module.if(module.i32.eqz(module.global.get(dG, i32)), addToGlobal(ibG, durB())),
       module.global.set(CHILDB, module.i64.add(module.local.get(SAVEDB, i64), durB())),
       module.global.set(CHILDA, module.i64.add(module.local.get(SAVEDA, i64), durA())),
+      module.global.set(CHILDP, module.i64.add(module.local.get(SAVEDP, i64), durP())),
     ];
     if (hasResult) body.push(module.local.get(RES, results));
     module.addFunction(name, params, results, vars, module.block(null, body, hasResult ? results : binaryen.none));
@@ -445,6 +469,12 @@ export async function instrumentAllocWasm(input) {
   ];
   const targets = [];
   const candidates = [];
+  // managed split (__new sees the payload size pre-header) and realloc
+  // requests (tlsf reallocateBlock covers in-place growth AND moves; its
+  // moves allocate through the chokepoint, so these counters stay separate
+  // from the claimed-bytes total — adding them in would double-count)
+  const extras = [];
+  const reallocCandidates = [];
   const numFns = raw._BinaryenGetNumFunctions(modPtr);
   for (let i = 0; i < numFns; i++) {
     const fnRef = raw._BinaryenGetFunctionByIndex(modPtr, i);
@@ -452,16 +482,35 @@ export async function instrumentAllocWasm(input) {
     if (!info.body) continue; // imported
     const level = CHOKEPOINTS.findIndex((c) => c.re.test(info.name));
     if (level >= 0) candidates.push({ ref: fnRef, body: info.body, level, sizeParam: CHOKEPOINTS[level].sizeParam });
+    if (/^~lib\/rt\/(itcms|stub|tlsf)\/__new$/.test(info.name)) extras.push({ ref: fnRef, body: info.body, sizeParam: 0, bytesG: MBYTES, countG: MALLOCS });
+    // realloc requests: reallocateBlock sees every request (in-place + move)
+    // but inlines away under -O (single caller); moveBlock survives and
+    // catches moves — never both, or moves double-count
+    if (/^~lib\/rt\/tlsf\/(reallocateBlock|moveBlock)$/.test(info.name)) {
+      reallocCandidates.push({ ref: fnRef, body: info.body, outer: info.name.endsWith("reallocateBlock") });
+    }
     if (info.name.startsWith("~lib/rt/")) continue; // charge runtime work to its caller
     if (binaryen.expandType(info.results).length > 1) continue; // multivalue: can't forward through one RES local
     targets.push({ name: info.name, params: info.params, results: info.results, vars: info.vars, body: info.body });
   }
-  // bump the monotone counters with the claimed size at the deepest layer present
+  // bump the monotone counters with the claimed size at the deepest layer
+  // present; a function carrying both a chokepoint and an extra counter
+  // (e.g. __new as the fallback chokepoint) gets both preludes fused
   const best = candidates.length > 0 ? Math.min(...candidates.map((c) => c.level)) : -1;
-  for (const a of candidates) {
-    if (a.level !== best) continue;
-    const prelude = [addToGlobal(BYTES, module.i64.extend_u(module.local.get(a.sizeParam, i32))), addToGlobal(ALLOCS, i64const(1n))];
-    raw._BinaryenFunctionSetBody(a.ref, module.block(null, [...prelude, a.body], binaryen.auto));
+  const preludes = new Map();
+  const addPrelude = (ref, body, sizeParam, bytesG, countG) => {
+    const entry = preludes.get(ref) ?? { body, stmts: [] };
+    entry.stmts.push(addToGlobal(bytesG, module.i64.extend_u(module.local.get(sizeParam, i32))), addToGlobal(countG, i64const(1n)));
+    preludes.set(ref, entry);
+  };
+  for (const a of candidates) if (a.level === best) addPrelude(a.ref, a.body, a.sizeParam, BYTES, ALLOCS);
+  const haveOuterRealloc = reallocCandidates.some((r) => r.outer);
+  for (const r of reallocCandidates) {
+    if (r.outer === haveOuterRealloc) extras.push({ ref: r.ref, body: r.body, sizeParam: 2, bytesG: RBYTES, countG: RCOUNT });
+  }
+  for (const e of extras) addPrelude(e.ref, e.body, e.sizeParam, e.bytesG, e.countG);
+  for (const [ref, p] of preludes) {
+    raw._BinaryenFunctionSetBody(ref, module.block(null, [...p.stmts, p.body], binaryen.auto));
   }
   const functions = [];
   for (const t of targets) {
