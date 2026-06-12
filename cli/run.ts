@@ -7,7 +7,7 @@ import chalk from "chalk";
 import { glob } from "glob";
 import { runBenchFile, TUNE_KEYS, type BenchReporter, type TuneOverrides, type BaselineSample, EstimateKind } from "../lib/build/as-bs.js";
 import { FrameParser } from "../lib/build/wipc.js";
-import { loadConfig, tunesFromSettings, type ResolvedConfig, type RenderConfig } from "./config.js";
+import { loadConfig, tunesFromSettings, toRuntimeEntries, type ResolvedConfig, type RenderConfig, type RuntimeEntry } from "./config.js";
 
 const require = createRequire(import.meta.url);
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,8 +18,8 @@ export interface RunFlags {
   buildOnly: boolean;
   saveBaseline?: string;
   baseline?: string;
-  /** Explicit --runtime; undefined falls back to the config. */
-  runtime?: string;
+  /** Explicit --runtime values (repeatable); empty falls back to the config. */
+  runtimes: string[];
   configPath?: string;
   mode?: string;
 }
@@ -43,7 +43,7 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
   let verbose = false;
   let saveBaseline: string | undefined;
   let baseline: string | undefined;
-  let runtime: string | undefined;
+  const runtimes: string[] = [];
   let configPath: string | undefined;
   let mode: string | undefined;
   const num = (name: string, v: string | undefined): number => {
@@ -73,8 +73,9 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
       if (!baseline || baseline.startsWith("-")) throw new Error("--baseline expects an id");
     } else if (a === "--deterministic") tunes.deterministic = 1;
     else if (a === "--runtime") {
-      runtime = args[++i] ?? "";
-      if (!runtime || runtime.startsWith("-")) throw new Error("--runtime expects node|wasmtime|wasmer|wazero or a command template containing <file>");
+      const runtime = args[++i] ?? "";
+      if (!runtime || runtime.startsWith("-")) throw new Error('--runtime expects node|wasmtime|wasmer|wazero or a command like "wazero run <file>" (repeat the flag to compare runtimes)');
+      runtimes.push(runtime);
     } else if (a === "--config") {
       configPath = args[++i];
       if (!configPath || configPath.startsWith("-")) throw new Error("--config expects a path");
@@ -85,7 +86,7 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else selectors.push(a);
   }
-  return { flags: { tunes, verbose, buildOnly: false, saveBaseline, baseline, runtime, configPath, mode }, selectors };
+  return { flags: { tunes, verbose, buildOnly: false, saveBaseline, baseline, runtimes, configPath, mode }, selectors };
 }
 
 export async function findBenchFiles(selectors: string[], inputGlobs: string[]): Promise<string[]> {
@@ -171,6 +172,8 @@ export class Renderer implements BenchReporter {
   baselineSource: ((key: string, sampleCount: number) => BaselineSample | undefined) | null = null;
   /** Raw-sample sink (wired by the CLI when --save-baseline is given). */
   sampleSink: ((key: string, iters: Float64Array, times: Float64Array) => void) | null = null;
+  /** Point-estimate sink (wired by the CLI for the multi-runtime comparison table). */
+  resultSink: ((key: string, point: number) => void) | null = null;
 
   private readonly significanceLevel: number;
   private readonly noiseThreshold: number;
@@ -253,6 +256,7 @@ export class Renderer implements BenchReporter {
     this.clearStatus();
     const name = this.label().padEnd(24);
     console.log(`${chalk.bold(name)} time: [${formatTime(lb)} ${chalk.bold(formatTime(point))} ${formatTime(hb)}]`);
+    this.resultSink?.(this.label(), point);
   }
 
   private renderDelta(lb: number, point: number, hb: number, pValue: number, vs: string): void {
@@ -306,6 +310,15 @@ export class Renderer implements BenchReporter {
 
 // --- commands -------------------------------------------------------------------
 
+/** Split a command string into argv, honoring single/double quotes. */
+function tokenizeCommand(cmd: string): string[] {
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cmd)) !== null) tokens.push(m[1] ?? m[2] ?? m[3]);
+  return tokens;
+}
+
 /** Run a WIPC build under an external WASI runtime, streaming frames to the reporter. */
 async function runExternal(runtime: string, wasmPath: string, reporter: BenchReporter, tunes: TuneOverrides): Promise<void> {
   // settings overrides travel as AS_BENCH_TUNE_<kind> env vars
@@ -320,12 +333,34 @@ async function runExternal(runtime: string, wasmPath: string, reporter: BenchRep
   let args: string[];
   if (template) {
     ({ cmd, args } = template(envPairs, wasmPath));
-  } else if (runtime.includes("<file>")) {
-    const parts = runtime.split(/\s+/).map((p) => (p === "<file>" ? wasmPath : p));
-    cmd = parts[0];
-    args = parts.slice(1);
   } else {
-    throw new Error(`unknown runtime "${runtime}" — use node|${Object.keys(RUNTIME_TEMPLATES).join("|")} or a command template containing <file>`);
+    const tokens = tokenizeCommand(runtime);
+    // a bare single word is far more likely a typo'd runtime name than a
+    // zero-argument runner — require an argument or <file> to disambiguate
+    if (tokens.length < 2 && !runtime.includes("<file>")) {
+      throw new Error(`unknown runtime "${runtime}" — use node|${Object.keys(RUNTIME_TEMPLATES).join("|")}, or a command like "wazero run <file>" (<file> is appended when omitted)`);
+    }
+    // <env:PREFIX> expands the AS_BENCH_TUNE_* pairs for runtimes that don't
+    // forward host env to the guest: trailing "=" fuses prefix and pair into
+    // one token (--env=K=V), otherwise they become two (-env K=V)
+    let hasFile = false;
+    args = [];
+    for (const t of tokens) {
+      const env = /^<env(?::(.+))?>$/.exec(t);
+      if (env) {
+        const prefix = env[1];
+        for (const pair of envPairs) {
+          if (prefix === undefined) args.push(pair);
+          else if (prefix.endsWith("=")) args.push(prefix + pair);
+          else args.push(prefix, pair);
+        }
+        continue;
+      }
+      if (t.includes("<file>")) hasFile = true;
+      args.push(t.split("<file>").join(wasmPath));
+    }
+    if (!hasFile) args.push(wasmPath);
+    cmd = args.shift()!;
   }
 
   const parser = new FrameParser(reporter, (bytes) => process.stdout.write(bytes));
@@ -360,7 +395,7 @@ export async function executeRun(args: string[]): Promise<void> {
   // precedence: defaults < config < mode < CLI flags
   const tunes: TuneOverrides = { ...tunesFromSettings(cfg.settings), ...flags.tunes };
   if (cfg.deterministic && tunes.deterministic === undefined) tunes.deterministic = 1;
-  const runtime = flags.runtime ?? cfg.runtime;
+  const runtimes: RuntimeEntry[] = flags.runtimes.length > 0 ? toRuntimeEntries(flags.runtimes.map((spec) => ({ spec }))) : cfg.runtimes;
   const verbose = flags.verbose || cfg.verbose;
 
   const files = await findBenchFiles(selectors, cfg.input);
@@ -370,60 +405,96 @@ export async function executeRun(args: string[]): Promise<void> {
     return;
   }
 
-  const external = runtime !== "node";
-  if (external && tunes.deterministic === 1) {
+  const multi = runtimes.length > 1;
+  const anyExternal = runtimes.some((rt) => rt.spec !== "node");
+  const anyNode = runtimes.some((rt) => rt.spec === "node");
+  if (anyExternal && tunes.deterministic === 1) {
     throw new Error("--deterministic requires the node host (record/replay wraps imports in-process)");
   }
-  if (external && flags.baseline) {
-    console.log(chalk.yellow(`warning: --baseline comparison needs the node host (request/reply); external runs can still --save-baseline`));
+  if (anyExternal && flags.baseline) {
+    console.log(chalk.yellow(`warning: --baseline comparison needs the node host (request/reply); only node runs compare, external runs can still --save-baseline`));
   }
 
-  const loaded = !external && flags.baseline ? loadBaselineFile(cfg.baselineDir, flags.baseline) : null;
+  const loaded = anyNode && flags.baseline ? loadBaselineFile(cfg.baselineDir, flags.baseline) : null;
   const collected: BaselineFile["benches"] = {};
   const sizeMismatchWarned = new Set<string>();
+  // bench label -> runtime label -> point estimate, for the comparison table
+  const comparison = new Map<string, Map<string, number>>();
 
   const deterministic = tunes.deterministic === 1;
   for (const file of files) {
-    console.log(chalk.dim(`compiling ${file}${deterministic ? " (deterministic)" : ""}${external ? ` (wipc, runtime: ${runtime})` : ""}`));
+    console.log(chalk.dim(`compiling ${file}${deterministic ? " (deterministic)" : ""}${anyExternal ? ` (wipc${multi ? "" : `, runtime: ${runtimes[0].label}`})` : ""}`));
     // deterministic builds route engine timing through the passthrough host
     // import so the WASI clock stays recordable for user code; external
-    // runtimes get the WIPC build whose only imports are wasi_snapshot_preview1
-    let wasmPath: string;
-    if (external) wasmPath = await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc");
-    else if (deterministic) wasmPath = await buildBenchFile(file, cfg, ["--use", "AS_BENCH_DETERMINISTIC=1"], ".det");
-    else wasmPath = await buildBenchFile(file, cfg);
-    if (flags.buildOnly) {
-      console.log(chalk.dim(`built ${wasmPath}`));
-      continue;
-    }
+    // runtimes get the WIPC build whose only imports are wasi_snapshot_preview1.
+    // Runtimes of the same kind share one build per file.
+    let wipcPath: string | undefined;
+    let nodePath: string | undefined;
+    for (const rt of runtimes) {
+      const external = rt.spec !== "node";
+      let wasmPath: string;
+      if (external) wasmPath = wipcPath ??= await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc");
+      else if (deterministic) wasmPath = nodePath ??= await buildBenchFile(file, cfg, ["--use", "AS_BENCH_DETERMINISTIC=1"], ".det");
+      else wasmPath = nodePath ??= await buildBenchFile(file, cfg);
+      if (flags.buildOnly) {
+        console.log(chalk.dim(`built ${wasmPath}`));
+        continue;
+      }
+      if (multi) console.log(chalk.cyan(`\n[${rt.label}]`));
 
-    const fileKey = (key: string) => `${path.basename(file)}::${key}`;
-    const renderer = new Renderer(verbose, cfg.render);
-    renderer.baselineId = flags.baseline ?? null;
-    if (loaded) {
-      renderer.baselineSource = (key, sampleCount) => {
-        const entry = loaded.benches[fileKey(key)];
-        if (!entry) return undefined;
-        if (entry.sampleSize !== sampleCount) {
-          if (!sizeMismatchWarned.has(key)) {
-            sizeMismatchWarned.add(key);
-            console.log(chalk.yellow(`warning: baseline '${flags.baseline}' for ${key} has ${entry.sampleSize} samples but this run uses ${sampleCount} — skipping comparison (match --samples to compare)`));
+      // with multiple runtimes, baseline keys carry the runtime label so runs
+      // under different runtimes don't collide
+      const fileKey = (key: string) => `${path.basename(file)}::${multi ? `${rt.label}::` : ""}${key}`;
+      const renderer = new Renderer(verbose, cfg.render);
+      renderer.baselineId = flags.baseline ?? null;
+      if (loaded && !external) {
+        renderer.baselineSource = (key, sampleCount) => {
+          const entry = loaded.benches[fileKey(key)];
+          if (!entry) return undefined;
+          if (entry.sampleSize !== sampleCount) {
+            if (!sizeMismatchWarned.has(key)) {
+              sizeMismatchWarned.add(key);
+              console.log(chalk.yellow(`warning: baseline '${flags.baseline}' for ${key} has ${entry.sampleSize} samples but this run uses ${sampleCount} — skipping comparison (match --samples to compare)`));
+            }
+            return undefined;
           }
-          return undefined;
-        }
-        return entry;
-      };
-    }
-    if (flags.saveBaseline) {
-      renderer.sampleSink = (key, iters, times) => {
-        collected[fileKey(key)] = { sampleSize: iters.length, iters: Array.from(iters), times: Array.from(times) };
-      };
-    }
+          return entry;
+        };
+      }
+      if (flags.saveBaseline) {
+        renderer.sampleSink = (key, iters, times) => {
+          collected[fileKey(key)] = { sampleSize: iters.length, iters: Array.from(iters), times: Array.from(times) };
+        };
+      }
+      if (multi) {
+        renderer.resultSink = (key, point) => {
+          const benchKey = `${path.basename(file)}::${key}`;
+          let byRuntime = comparison.get(benchKey);
+          if (!byRuntime) comparison.set(benchKey, (byRuntime = new Map()));
+          byRuntime.set(rt.label, point);
+        };
+      }
 
-    if (external) {
-      await runExternal(runtime, wasmPath, renderer, tunes);
-    } else {
-      await runBenchFile(wasmPath, renderer, tunes);
+      if (external) {
+        await runExternal(rt.spec, wasmPath, renderer, tunes);
+      } else {
+        await runBenchFile(wasmPath, renderer, tunes);
+      }
+    }
+  }
+
+  if (multi && !flags.buildOnly && comparison.size > 0) {
+    console.log(chalk.bold("\nruntime comparison") + chalk.dim(" (point estimates, fastest = 1.00×)"));
+    const labelWidth = Math.max(...runtimes.map((rt) => rt.label.length));
+    for (const [bench, byRuntime] of comparison) {
+      console.log(`\n${chalk.bold(bench)}`);
+      const fastest = Math.min(...byRuntime.values());
+      for (const rt of runtimes) {
+        const point = byRuntime.get(rt.label);
+        if (point === undefined) continue;
+        const ratio = `${(point / fastest).toFixed(2)}×`;
+        console.log(`  ${rt.label.padEnd(labelWidth)}  ${formatTime(point).padStart(10)}  ${point === fastest ? chalk.green(ratio) : ratio}`);
+      }
     }
   }
 
@@ -445,10 +516,12 @@ export async function executeBuild(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const external = (flags.runtime ?? cfg.runtime) !== "node";
+  const runtimes = flags.runtimes.length > 0 ? toRuntimeEntries(flags.runtimes.map((spec) => ({ spec }))) : cfg.runtimes;
+  const anyExternal = runtimes.some((rt) => rt.spec !== "node");
+  const anyNode = runtimes.some((rt) => rt.spec === "node");
   for (const file of files) {
-    console.log(chalk.dim(`compiling ${file}${external ? " (wipc)" : ""}`));
-    const wasmPath = external ? await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc") : await buildBenchFile(file, cfg);
-    console.log(chalk.dim(`built ${wasmPath}`));
+    console.log(chalk.dim(`compiling ${file}${anyExternal ? " (wipc)" : ""}`));
+    if (anyNode) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg)}`));
+    if (anyExternal) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc")}`));
   }
 }

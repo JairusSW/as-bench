@@ -27,9 +27,12 @@ ${chalk.bold("Commands")}
     --baseline <id>     Compare each bench against a saved baseline
     --deterministic     Record host imports once (iteration 2), replay them for
                         every later iteration — neutralizes host nondeterminism
-    --runtime <r>       node (default) | wasmtime | wasmer | wazero | a command
-                        template containing <file> — external runtimes run a
-                        pure-WASI build reporting over framed stdout (WIPC)
+    --runtime <r>       node (default) | wasmtime | wasmer | wazero | any
+                        command, e.g. "wazero run <env:-env> <file>" — <file>
+                        is the bench wasm (appended when omitted), <env:PREFIX>
+                        expands settings as env flags; external runtimes run a
+                        pure-WASI build reporting over framed stdout (WIPC);
+                        also configurable as runOptions.runtime.cmd
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
   profile             Tier-free work profile: wasm instruction counts per call

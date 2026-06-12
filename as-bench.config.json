@@ -21,10 +21,19 @@
       "runtime": "wasmer"
     },
     "wazero": {
-      "runtime": "wazero"
+      "runOptions": {
+        "runtime": {
+          "cmd": "wazero run <env:-env> <file>"
+        }
+      }
     },
     "deterministic": {
       "deterministic": true
+    },
+    "compare": {
+      "runOptions": {
+        "runtime": ["node", "wasmtime", "wasmer", { "cmd": "wazero run <env:-env> <file>", "name": "wazero" }]
+      }
     }
   }
 }

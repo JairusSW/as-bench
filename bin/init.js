@@ -16,6 +16,13 @@ const STARTER_CONFIG = `{
     },
     "wasmtime": {
       "runtime": "wasmtime"
+    },
+    "custom": {
+      "runOptions": {
+        "runtime": {
+          "cmd": "wazero run <file>"
+        }
+      }
     }
   }
 }

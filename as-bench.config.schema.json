@@ -102,6 +102,40 @@
         }
       }
     },
+    "runtimeEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [{ "required": ["cmd"] }, { "required": ["name"] }],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display label used in headers, the comparison table, and baseline keys. Without \"cmd\" it is also the runtime itself: node | wasmtime | wasmer | wazero."
+        },
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Command that runs each bench wasm, e.g. \"wazero run <env:-env> <file>\". <file> is replaced with the artifact path (appended as the last argument when omitted). The bench is a pure-WASI WIPC build reporting over framed stdout. Settings overrides are exported in the child's environment as AS_BENCH_TUNE_<kind>=<value>; runtimes that don't forward host env to the guest also need them as flags — <env:PREFIX> expands each pair, fusing a trailing '=' into one argument (<env:--env=> → --env=K=V) and otherwise emitting two (<env:-env> → -env K=V)."
+        }
+      }
+    },
+    "runOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How compiled benches are executed (as-test-style). Takes precedence over the top-level \"runtime\" shorthand.",
+      "properties": {
+        "runtime": {
+          "description": "One runtime, or several — a list runs every bench under each runtime and renders a comparison table (and prefixes baseline keys with the runtime label). List entries may also be plain strings (a named runtime or command template, as in the top-level \"runtime\" shorthand).",
+          "oneOf": [
+            { "$ref": "#/definitions/runtimeEntry" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": { "oneOf": [{ "type": "string", "minLength": 1 }, { "$ref": "#/definitions/runtimeEntry" }] }
+            }
+          ]
+        }
+      }
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,
@@ -140,10 +174,11 @@
           "description": "Directory for baselines saved with --save-baseline."
         },
         "runtime": {
-          "type": "string",
           "default": "node",
-          "description": "node (in-process host) | wasmtime | wasmer | wazero | a command template containing <file>. External runtimes run a pure-WASI build reporting over framed stdout; --baseline comparison and --deterministic need node."
+          "oneOf": [{ "type": "string" }, { "type": "array", "minItems": 1, "items": { "type": "string" } }],
+          "description": "node (in-process host) | wasmtime | wasmer | wazero | a command like \"wazero run <file>\"; an array runs every bench under each runtime and renders a comparison table. Shorthand for runOptions.runtime. External runtimes run a pure-WASI build reporting over framed stdout; --baseline comparison and --deterministic need node."
         },
+        "runOptions": { "$ref": "#/definitions/runOptions" },
         "verbose": {
           "type": "boolean",
           "default": false,
@@ -168,6 +203,7 @@
     "outDir": true,
     "baselineDir": true,
     "runtime": true,
+    "runOptions": true,
     "verbose": true,
     "deterministic": true,
     "settings": true,

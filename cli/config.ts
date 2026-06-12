@@ -5,6 +5,7 @@
 // Precedence: built-in defaults < config file < --mode overlay < CLI flags.
 
 import fs from "node:fs";
+import path from "node:path";
 import type { TuneOverrides } from "../lib/build/as-bs.js";
 
 export interface SettingsConfig {
@@ -42,6 +43,40 @@ export interface BuildConfig {
   args?: string[];
 }
 
+export interface RuntimeOptions {
+  /**
+   * Display label (headers, comparison table, baseline keys). Without cmd it
+   * is also the runtime itself: node | wasmtime | wasmer | wazero.
+   */
+  name?: string;
+  /**
+   * Command that runs each bench wasm, e.g. "wazero run <env:-env> <file>".
+   * "<file>" is replaced with the artifact path (appended as the last
+   * argument when absent); "<env:PREFIX>" expands the AS_BENCH_TUNE_* pairs
+   * as flags for runtimes that don't forward host env to the guest. Takes
+   * precedence over the top-level "runtime" shorthand.
+   */
+  cmd?: string;
+}
+
+export interface RunConfig {
+  /**
+   * One runtime, or several — a list runs every bench under each runtime and
+   * renders a comparison table. List entries may also be plain strings (a
+   * named runtime or command template, as in the top-level "runtime"
+   * shorthand).
+   */
+  runtime?: RuntimeOptions | (string | RuntimeOptions)[];
+}
+
+/** A resolved runtime the run loop iterates over. */
+export interface RuntimeEntry {
+  /** Display label used in headers, the comparison table, and baseline keys. */
+  label: string;
+  /** What actually runs: "node" (in-process), a named runtime, or a command template. */
+  spec: string;
+}
+
 export interface ProfileConfig {
   /** Rows per bench in profile tables. */
   top?: number;
@@ -57,8 +92,10 @@ export interface AsBenchConfig {
   outDir?: string;
   /** Saved baseline directory. */
   baselineDir?: string;
-  /** node (in-process) | wasmtime | wasmer | wazero | command template with <file>. */
-  runtime?: string;
+  /** node (in-process) | wasmtime | wasmer | wazero | command template with <file>; an array runs every bench under each. Shorthand for runOptions.runtime. */
+  runtime?: string | string[];
+  /** How compiled benches are executed (as-test-style); runOptions.runtime wins over the runtime shorthand. */
+  runOptions?: RunConfig;
   /** Print all estimates per bench. */
   verbose?: boolean;
   /** Record host imports once, replay every later iteration. */
@@ -75,7 +112,7 @@ export interface ResolvedConfig {
   input: string[];
   outDir: string;
   baselineDir: string;
-  runtime: string;
+  runtimes: RuntimeEntry[];
   verbose: boolean;
   deterministic: boolean;
   settings: SettingsConfig;
@@ -88,7 +125,7 @@ const DEFAULTS: ResolvedConfig = {
   input: ["assembly/__benches__/**/*.ts"],
   outDir: ".as-bench/build",
   baselineDir: ".as-bench/baselines",
-  runtime: "node",
+  runtimes: [{ label: "node", spec: "node" }],
   verbose: false,
   deterministic: false,
   settings: {},
@@ -105,6 +142,37 @@ function fail(msg: string): never {
   throw new Error(`as-bench config: ${msg}`);
 }
 
+/** Label a runtime spec: named runtimes by name, commands by their executable's basename. */
+function labelForSpec(spec: string): string {
+  const first = spec.trim().split(/\s+/)[0] ?? "";
+  return path.basename(first) || spec;
+}
+
+/** Make labeled entries from specs (+ optional explicit names), deduping repeated labels with #n. */
+export function toRuntimeEntries(items: { spec: string; name?: string }[]): RuntimeEntry[] {
+  const counts = new Map<string, number>();
+  return items.map(({ spec, name }) => {
+    const base = name ?? labelForSpec(spec);
+    const n = (counts.get(base) ?? 0) + 1;
+    counts.set(base, n);
+    return { label: n === 1 ? base : `${base}#${n}`, spec };
+  });
+}
+
+/** Resolve the layer's runtime list, runOptions.runtime winning over the runtime shorthand. */
+function runtimesFrom(cfg: AsBenchConfig): RuntimeEntry[] | undefined {
+  const ro = cfg.runOptions?.runtime;
+  if (ro !== undefined) {
+    const list = Array.isArray(ro) ? ro : [ro];
+    return toRuntimeEntries(list.map((r) => (typeof r === "string" ? { spec: r } : { spec: r.cmd ?? r.name ?? "node", name: r.name })));
+  }
+  if (cfg.runtime !== undefined) {
+    const list = Array.isArray(cfg.runtime) ? cfg.runtime : [cfg.runtime];
+    return toRuntimeEntries(list.map((spec) => ({ spec })));
+  }
+  return undefined;
+}
+
 function checkNumber(value: unknown, name: string, min: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < min) fail(`${name} must be a number >= ${min}, got ${JSON.stringify(value)}`);
   return value;
@@ -112,11 +180,31 @@ function checkNumber(value: unknown, name: string, min: number): number {
 
 function validate(cfg: AsBenchConfig, where: string): void {
   if (cfg.input !== undefined && (!Array.isArray(cfg.input) || cfg.input.some((p) => typeof p !== "string"))) fail(`${where}input must be an array of glob strings`);
-  for (const key of ["outDir", "baselineDir", "runtime"] as const) {
+  for (const key of ["outDir", "baselineDir"] as const) {
     if (cfg[key] !== undefined && typeof cfg[key] !== "string") fail(`${where}${key} must be a string`);
   }
   for (const key of ["verbose", "deterministic"] as const) {
     if (cfg[key] !== undefined && typeof cfg[key] !== "boolean") fail(`${where}${key} must be a boolean`);
+  }
+  if (cfg.runtime !== undefined) {
+    const list = Array.isArray(cfg.runtime) ? cfg.runtime : [cfg.runtime];
+    if (list.length === 0 || list.some((s) => typeof s !== "string" || s.trim() === "")) fail(`${where}runtime must be a non-empty string or a non-empty array of them`);
+  }
+  const ro = cfg.runOptions?.runtime;
+  if (ro !== undefined) {
+    if (typeof ro === "string") fail(`${where}runOptions.runtime must be a {cmd, name} object or an array — for a single string use the top-level "runtime" shorthand`);
+    const list = Array.isArray(ro) ? ro : [ro];
+    if (list.length === 0) fail(`${where}runOptions.runtime must not be an empty array`);
+    for (const r of list) {
+      if (typeof r === "string") {
+        if (r.trim() === "") fail(`${where}runOptions.runtime string entries must be non-empty`);
+        continue;
+      }
+      if (typeof r !== "object" || r === null) fail(`${where}runOptions.runtime entries must be strings or {cmd, name} objects`);
+      if (r.name !== undefined && typeof r.name !== "string") fail(`${where}runOptions.runtime.name must be a string`);
+      if (r.cmd !== undefined && (typeof r.cmd !== "string" || r.cmd.trim() === "")) fail(`${where}runOptions.runtime.cmd must be a non-empty command string`);
+      if (r.name === undefined && r.cmd === undefined) fail(`${where}runOptions.runtime entries need "cmd" and/or "name"`);
+    }
   }
   const s = cfg.settings;
   if (s !== undefined) {
@@ -144,7 +232,7 @@ function overlay(base: ResolvedConfig, cfg: AsBenchConfig): ResolvedConfig {
     input: cfg.input ?? base.input,
     outDir: cfg.outDir ?? base.outDir,
     baselineDir: cfg.baselineDir ?? base.baselineDir,
-    runtime: cfg.runtime ?? base.runtime,
+    runtimes: runtimesFrom(cfg) ?? base.runtimes,
     verbose: cfg.verbose ?? base.verbose,
     deterministic: cfg.deterministic ?? base.deterministic,
     settings: { ...base.settings, ...cfg.settings },
