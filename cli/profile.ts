@@ -2,13 +2,13 @@ import fs from "node:fs";
 import chalk from "chalk";
 import { benchImports } from "../lib/build/as-bs.js";
 import { buildBenchFile, findBenchFiles } from "./run.js";
-import { instrumentWasm, instrumentTimeWasm, type ProfiledFunction } from "./instrument.js";
+import { instrumentWasm, instrumentTimeWasm, instrumentAllocWasm, type ProfiledFunction } from "./instrument.js";
 import { loadConfig } from "./config.js";
 
 interface ProfileFlags {
   top?: number;
   all?: boolean;
-  heaviest: "instr" | "time";
+  heaviest: "instr" | "time" | "alloc";
   iters?: number;
   minInstrs?: number;
   configPath?: string;
@@ -55,7 +55,7 @@ export function parseProfileFlags(args: string[]): { flags: ProfileFlags; select
       if (!flags.mode || flags.mode.startsWith("-")) throw new Error("--mode expects a mode name");
     } else if (a.startsWith("--heaviest=")) {
       const mode = a.slice("--heaviest=".length);
-      if (mode !== "instr" && mode !== "time") throw new Error(`--heaviest expects instr|time, got "${mode}"`);
+      if (mode !== "instr" && mode !== "time" && mode !== "alloc") throw new Error(`--heaviest expects instr|time|alloc, got "${mode}"`);
       flags.heaviest = mode;
     } else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else selectors.push(a);
@@ -234,6 +234,111 @@ async function runTimeProfiled(wasmPath: string, functions: ProfiledFunction[], 
   return profiles;
 }
 
+interface AllocRow {
+  name: string;
+  calls: bigint;
+  selfBytes: bigint;
+  inclBytes: bigint; // outermost frames only
+  allocs: bigint;
+}
+
+interface BenchAllocProfile {
+  key: string;
+  rows: AllocRow[];
+  /** Linear-memory pages grown during the bench window. */
+  pagesGrown: number;
+}
+
+async function runAllocProfiled(wasmPath: string, functions: ProfiledFunction[], iters: number): Promise<BenchAllocProfile[]> {
+  const bytes = fs.readFileSync(wasmPath);
+  const { WASI } = await import("node:wasi");
+  const wasi = new WASI({ version: "preview1", args: [wasmPath], env: {}, preopens: {} });
+
+  // eslint-disable-next-line prefer-const
+  let instance: WebAssembly.Instance;
+  const getMem = () => instance!.exports.memory as WebAssembly.Memory;
+
+  const snapshot = (): { c: bigint[]; sb: bigint[]; ib: bigint[]; sa: bigint[] } => {
+    const exp = instance!.exports as Record<string, WebAssembly.Global>;
+    return {
+      c: functions.map((f) => exp[`__aprof_c_${f.k}`].value as bigint),
+      sb: functions.map((f) => exp[`__aprof_sb_${f.k}`].value as bigint),
+      ib: functions.map((f) => exp[`__aprof_ib_${f.k}`].value as bigint),
+      sa: functions.map((f) => exp[`__aprof_sa_${f.k}`].value as bigint),
+    };
+  };
+
+  const profiles: BenchAllocProfile[] = [];
+  let suiteName: string | null = null;
+  let benchName = "";
+  let started: ReturnType<typeof snapshot> | null = null;
+  let memStart = 0;
+
+  const reporter = {
+    suiteStart: (name: string) => (suiteName = name),
+    suiteEnd: () => (suiteName = null),
+    benchStart: (name: string) => {
+      benchName = name;
+      memStart = getMem().buffer.byteLength;
+      started = snapshot();
+    },
+    benchEnd: () => {
+      if (!started) return;
+      const end = snapshot();
+      const pagesGrown = (getMem().buffer.byteLength - memStart) / 65536;
+      const rows: AllocRow[] = [];
+      for (let i = 0; i < functions.length; i++) {
+        const calls = end.c[i] - started.c[i];
+        if (calls === 0n) continue;
+        const selfBytes = end.sb[i] - started.sb[i];
+        const inclBytes = end.ib[i] - started.ib[i];
+        if (selfBytes === 0n && inclBytes === 0n) continue; // nothing allocated under it
+        rows.push({ name: functions[i].name, calls, selfBytes, inclBytes, allocs: end.sa[i] - started.sa[i] });
+      }
+      rows.sort((a, b) => (b.selfBytes > a.selfBytes ? 1 : b.selfBytes < a.selfBytes ? -1 : 0));
+      profiles.push({ key: suiteName !== null ? `${suiteName}/${benchName}` : benchName, rows, pagesGrown });
+      started = null;
+    },
+  };
+
+  const imports: WebAssembly.Imports = {
+    wasi_snapshot_preview1: wasi.wasiImport,
+    __asbench: benchImports(getMem, reporter, { profileMode: iters }),
+  };
+  const module = await WebAssembly.compile(bytes as BufferSource);
+  instance = await WebAssembly.instantiate(module, imports);
+  wasi.start(instance);
+  return profiles;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n.toFixed(0)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(2)} KiB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
+function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, all: boolean, iters: number, hasAllocator: boolean): void {
+  console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(` (bytes requested from the allocator, exact; ${iters} iteration${iters === 1 ? "" : "s"} per bench)`));
+  if (!hasAllocator) console.log(chalk.dim("  module contains no AS runtime allocator (~lib/rt/*/__new) — nothing in it can allocate"));
+  for (const p of profiles) {
+    let total = 0n;
+    for (const r of p.rows) total += r.selfBytes;
+    const grown = p.pagesGrown > 0 ? chalk.dim(` · memory +${p.pagesGrown} pages (${formatBytes(p.pagesGrown * 65536)})`) : "";
+    console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatBytes(Number(total))} allocated${grown}`);
+    const shown = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
+    for (const row of shown.slice(0, top)) {
+      const pct = total > 0n ? Number((row.selfBytes * 10000n) / total) / 100 : 0;
+      const perCall = row.calls > 0n ? formatBytes(Number(row.selfBytes) / Number(row.calls)) : "-";
+      console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatBytes(Number(row.selfBytes)).padStart(11)} self  ${formatBytes(Number(row.inclBytes)).padStart(11)} incl  ${formatCount(row.allocs).padStart(9)} allocs  ${formatCount(row.calls).padStart(9)} calls  ${perCall.padStart(11)}/call  ${row.name}`);
+    }
+    const hidden = p.rows.length - shown.length;
+    if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
+  }
+  console.log(chalk.dim(`\n  allocation pressure (bytes requested via __new, headers excluded), not live/peak memory — GC frees don't subtract.`));
+  console.log(chalk.dim(`  self excludes wrapped callees; incl counts outermost frames only (recursion-safe).`));
+}
+
 function formatCount(n: bigint): string {
   return n.toLocaleString("en-US");
 }
@@ -318,7 +423,16 @@ export async function executeProfile(args: string[]): Promise<void> {
     // --debug keeps the name section (--optimize strips it) so the profile
     // can attribute counts to function names; codegen is still optimized
     const wasmPath = await buildBenchFile(file, cfg, ["--debug"]);
-    if (flags.heaviest === "time") {
+    if (flags.heaviest === "alloc") {
+      const { wasm, functions, hasAllocator } = await instrumentAllocWasm(fs.readFileSync(wasmPath));
+      const instrPath = wasmPath.replace(/\.wasm$/, ".aprof.wasm");
+      fs.writeFileSync(instrPath, wasm);
+      console.log(chalk.dim(`wrapped ${functions.length} functions -> ${instrPath}`));
+      // exact + deterministic — one iteration suffices unless overridden
+      const allocIters = flags.iters ?? 1;
+      const profiles = await runAllocProfiled(instrPath, functions, allocIters);
+      renderAlloc(file, profiles, top, all, allocIters, hasAllocator);
+    } else if (flags.heaviest === "time") {
       const { wasm, functions, calibK, skipped } = await instrumentTimeWasm(fs.readFileSync(wasmPath), minInstrs);
       const instrPath = wasmPath.replace(/\.wasm$/, ".tprof.wasm");
       fs.writeFileSync(instrPath, wasm);

@@ -345,3 +345,123 @@ export async function instrumentTimeWasm(input, minWeight) {
   module.dispose();
   return { wasm, functions, calibK, skipped };
 }
+// Allocation pass for `asb profile --heaviest=alloc`.
+//
+// The AS runtime's `~lib/rt/*/__new(size, id)` gets a prelude bumping two
+// shared monotone globals — `__aprof_b` (bytes requested) and `__aprof_a`
+// (allocation count). Every other user-level function is then outlined with
+// the same move-body wrapper as the time pass, but reading those globals
+// instead of a clock: the identical save/zero/restore algebra attributes
+// exact self bytes (own frame minus wrapped callees) and outermost-gated
+// inclusive bytes. Unlike =time this is overhead-free measurement — the
+// wrapper can't distort a byte counter — so results are exact and
+// deterministic, need no calibration, and wrap everything regardless of
+// size.
+//
+// `~lib/rt/*` itself is never wrapped: the allocator's bumps must land in
+// the frame of whoever asked for the memory, and runtime helpers
+// (__newArray etc.) should charge their user-level caller, not themselves.
+// Measures allocation pressure (bytes requested from __new, headers
+// excluded), not live or peak memory — GC frees don't subtract.
+export async function instrumentAllocWasm(input) {
+  const binaryen = await loadBinaryen();
+  const module = binaryen.readBinary(input);
+  module.setFeatures(binaryen.Features.All);
+  const raw = binaryen;
+  const modPtr = module.ptr;
+  const i64 = binaryen.i64;
+  const i32 = binaryen.i32;
+  const i64const = (v) => module.i64.const(v);
+  const BYTES = "__aprof_b";
+  const ALLOCS = "__aprof_a";
+  const CHILDB = "__aprof_childb";
+  const CHILDA = "__aprof_childa";
+  for (const g of [BYTES, ALLOCS, CHILDB, CHILDA]) module.addGlobal(g, i64, true, i64const(0n));
+  const addToGlobal = (g, v) => module.global.set(g, module.i64.add(module.global.get(g, i64), v));
+  const wrapFunction = (k, name, innerName, params, results) => {
+    const cG = `__aprof_c_${k}`;
+    const sbG = `__aprof_sb_${k}`;
+    const ibG = `__aprof_ib_${k}`;
+    const saG = `__aprof_sa_${k}`;
+    const dG = `__aprof_d_${k}`;
+    for (const g of [cG, sbG, ibG, saG]) {
+      module.addGlobal(g, i64, true, i64const(0n));
+      module.addGlobalExport(g, g);
+    }
+    module.addGlobal(dG, i32, true, module.i32.const(0));
+    const paramTypes = binaryen.expandType(params);
+    const P = paramTypes.length;
+    const hasResult = results !== binaryen.none;
+    // locals: B0/A0 double as entry snapshots then frame deltas
+    const B0 = P;
+    const SAVEDB = P + 1;
+    const A0 = P + 2;
+    const SAVEDA = P + 3;
+    const RES = P + 4;
+    const vars = [i64, i64, i64, i64];
+    if (hasResult) vars.push(results);
+    const durB = () => module.local.get(B0, i64);
+    const durA = () => module.local.get(A0, i64);
+    const callInner = module.call(
+      innerName,
+      paramTypes.map((t, j) => module.local.get(j, t)),
+      results,
+    );
+    const body = [
+      module.local.set(B0, module.global.get(BYTES, i64)),
+      module.local.set(SAVEDB, module.global.get(CHILDB, i64)),
+      module.local.set(A0, module.global.get(ALLOCS, i64)),
+      module.local.set(SAVEDA, module.global.get(CHILDA, i64)),
+      module.global.set(CHILDB, i64const(0n)),
+      module.global.set(CHILDA, i64const(0n)),
+      addToGlobal(cG, i64const(1n)),
+      module.global.set(dG, module.i32.add(module.global.get(dG, i32), module.i32.const(1))),
+      hasResult ? module.local.set(RES, callInner) : callInner,
+      module.local.set(B0, module.i64.sub(module.global.get(BYTES, i64), module.local.get(B0, i64))), // B0 := frame bytes
+      module.local.set(A0, module.i64.sub(module.global.get(ALLOCS, i64), module.local.get(A0, i64))), // A0 := frame allocs
+      addToGlobal(sbG, module.i64.sub(durB(), module.global.get(CHILDB, i64))),
+      addToGlobal(saG, module.i64.sub(durA(), module.global.get(CHILDA, i64))),
+      module.global.set(dG, module.i32.sub(module.global.get(dG, i32), module.i32.const(1))),
+      module.if(module.i32.eqz(module.global.get(dG, i32)), addToGlobal(ibG, durB())),
+      module.global.set(CHILDB, module.i64.add(module.local.get(SAVEDB, i64), durB())),
+      module.global.set(CHILDA, module.i64.add(module.local.get(SAVEDA, i64), durA())),
+    ];
+    if (hasResult) body.push(module.local.get(RES, results));
+    module.addFunction(name, params, results, vars, module.block(null, body, hasResult ? results : binaryen.none));
+  };
+  const targets = [];
+  const allocators = [];
+  const numFns = raw._BinaryenGetNumFunctions(modPtr);
+  for (let i = 0; i < numFns; i++) {
+    const fnRef = raw._BinaryenGetFunctionByIndex(modPtr, i);
+    const info = binaryen.getFunctionInfo(fnRef);
+    if (!info.body) continue; // imported
+    if (/^~lib\/rt\/.*\/__new$/.test(info.name)) {
+      allocators.push({ ref: fnRef, body: info.body });
+      continue;
+    }
+    if (info.name.startsWith("~lib/rt/")) continue; // charge runtime work to its caller
+    if (binaryen.expandType(info.results).length > 1) continue; // multivalue: can't forward through one RES local
+    targets.push({ name: info.name, params: info.params, results: info.results, vars: info.vars, body: info.body });
+  }
+  // __new(size, id): bump the monotone counters with the requested size
+  for (const a of allocators) {
+    const prelude = [addToGlobal(BYTES, module.i64.extend_u(module.local.get(0, i32))), addToGlobal(ALLOCS, i64const(1n))];
+    raw._BinaryenFunctionSetBody(a.ref, module.block(null, [...prelude, a.body], binaryen.auto));
+  }
+  const functions = [];
+  for (const t of targets) {
+    const k = functions.length;
+    functions.push({ k, name: t.name });
+    const innerName = `${t.name}$aprof_inner`;
+    module.addFunction(innerName, t.params, t.results, t.vars, t.body);
+    module.removeFunction(t.name);
+    wrapFunction(k, t.name, innerName, t.params, t.results);
+  }
+  if (!module.validate()) {
+    throw new Error("alloc-instrumented module failed binaryen validation");
+  }
+  const wasm = module.emitBinary();
+  module.dispose();
+  return { wasm, functions, hasAllocator: allocators.length > 0 };
+}

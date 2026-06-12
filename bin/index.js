@@ -37,6 +37,7 @@ ${chalk.bold("Commands")}
     --heaviest=instr    Rank by cost-weighted instruction count (default; counts
                         exact + deterministic, weights from a static cost table)
     --heaviest=time     Rank by wall-clock self time (overhead-corrected, recursion-safe)
+    --heaviest=alloc    Rank by bytes allocated (exact; self/incl + allocs + pages grown)
     --top <n>           Rows per bench (default 10)
     --all               Include engine/runtime-internal rows
     --iters <n>         (time) Iterations per bench (default 10)
