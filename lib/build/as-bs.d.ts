@@ -17,6 +17,10 @@ export interface TuneOverrides {
     warmupTolerance?: number;
     warmupMinTime?: number;
 }
+export interface BaselineSample {
+    iters: ArrayLike<number>;
+    times: ArrayLike<number>;
+}
 export interface BenchReporter {
     benchStart?(name: string): void;
     warmupStarted?(durationMs: number): void;
@@ -32,6 +36,9 @@ export interface BenchReporter {
     suiteStart?(name: string): void;
     suiteChange?(lb: number, point: number, hb: number, pValue: number): void;
     suiteEnd?(): void;
+    sampleDone?(key: string, iters: Float64Array, times: Float64Array): void;
+    getBaseline?(key: string, sampleCount: number): BaselineSample | undefined;
+    change?(lb: number, point: number, hb: number, pValue: number): void;
 }
 export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides): WebAssembly.ModuleImports;
 export declare function runBenchFile(wasmPath: string, reporter?: BenchReporter, tunes?: TuneOverrides, extraImports?: WebAssembly.Imports): Promise<void>;

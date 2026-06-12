@@ -50,6 +50,25 @@ export declare function faultyConfig(linear: i32, actualMs: f64, recommendedSamp
 @external("__asbench", "faultyBenchmark")
 export declare function faultyBenchmark(): void;
 
+/** Raw sample exposure: n f64 iteration counts + n f64 sample times (ms). */
+// @ts-ignore: decorator
+@external("__asbench", "sampleDone")
+export declare function sampleDone(itersPtr: usize, timesPtr: usize, n: i32): void;
+
+/**
+ * Baseline pull: the host writes n f64 times + n f64 iters into the given
+ * engine buffers and returns 1 when it has a baseline for the current bench
+ * with a matching sample count; 0 otherwise.
+ */
+// @ts-ignore: decorator
+@external("__asbench", "loadBaseline")
+export declare function loadBaseline(timesPtr: usize, itersPtr: usize, n: i32): i32;
+
+/** Delta vs the loaded baseline: bounds are ratios (e.g. -0.05 = 5% faster). */
+// @ts-ignore: decorator
+@external("__asbench", "change")
+export declare function change(lb: f64, point: f64, hb: f64, pValue: f64): void;
+
 /** Estimate kinds: 0 mean, 1 median, 2 stdDev, 3 MAD, 4 slope. */
 // @ts-ignore: decorator
 @external("__asbench", "estimate")

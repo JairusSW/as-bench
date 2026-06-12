@@ -87,6 +87,9 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
    supply rich imports. CLI `run`/`build` work end-to-end with criterion-style
    rendering and `--warmup/--measure/--samples/--resamples/--sampling/
    --confidence/--verbose` overrides via the engine's `tune` import.
+2b. ~~**Baseline persistence**~~ — done. `--save-baseline <id>` /
+   `--baseline <id>`; raw samples in `.as-bench/baselines/<id>.json`;
+   pull-based `loadBaseline` host hook feeds the engine's existing compare().
 3. **Port `replay/`** verbatim; wire into `lib/as-bs.ts` as deterministic mode;
    add the passthrough exclude-set + auto-rewind; de-risk heap-drift.
 4. **Transform instrumentation pass** (Binaryen) → `profile --heaviest=instr`.

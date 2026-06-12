@@ -21,6 +21,8 @@ ${chalk.bold("Commands")}
     --resamples <n>     Override bootstrap resamples
     --sampling <m>      auto | linear | flat
     --confidence <x>    Confidence level (default 0.95)
+    --save-baseline <id>  Save this run's samples as a named baseline
+    --baseline <id>     Compare each bench against a saved baseline
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
   profile             Count work per call (not yet implemented)

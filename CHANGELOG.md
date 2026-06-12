@@ -7,6 +7,8 @@
 - Playground now runs the real engine.
 - WASI builds time via the shim's `performance.now()` (`clock_time_get(MONOTONIC)`) instead of the `__asbench.now` JS import — no host import on the hot path; `__asbench.now` remains the fallback for non-WASI targets.
 - Proper Apache-2.0 vendoring for the engine: full license text in `licenses/as-tral.LICENSE` + `NOTICE` crediting romdotdog/as-tral and Criterion.rs; both ship in the npm package.
+- Baseline persistence: `--save-baseline <id>` stores each bench's raw sample (iters + times) in `.as-bench/baselines/<id>.json`; `--baseline <id>` replays it through the engine's Welch-t + permutation comparison and renders `delta: [...] (p = ...) slower than baseline '<id>'`. Engine gains `sampleDone`/`loadBaseline`/`change` host hooks (pull-based baseline injection). Sample-size mismatches skip comparison with a warning. Verified: fib(21) vs fib(20) baseline reports +61.9% (golden ratio predicts +61.8%).
+- Delta verdicts now use criterion's rule — "no change" when the entire CI lies inside the noise band (was: only when the CI spanned zero).
 - Adaptive warmup: exits early once per-batch met stabilizes (2 consecutive batches within `warmupTolerance`, default 2%, after `warmupMinTime`); `warmupTime` is now a cap and `--warmup-tolerance 0` restores fixed-time warmup. Converged warmups derive met from the stable tail, not the cold-biased cumulative average. New `warmupEnded` event + `--warmup-tolerance`/`--warmup-min` flags. Example bench: 17.1s → 8.7s, identical results.
 
 - Scaffold the three build targets (`cli/`→`bin/`, `lib/`→`lib/build/`, `transform/src/`→`transform/lib/`) mirroring as-test.

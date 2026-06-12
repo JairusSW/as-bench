@@ -4,13 +4,14 @@ import fs from "node:fs";
 import path from "node:path";
 import chalk from "chalk";
 import { glob } from "glob";
-import { runBenchFile, type BenchReporter, type TuneOverrides, EstimateKind } from "../lib/build/as-bs.js";
+import { runBenchFile, type BenchReporter, type TuneOverrides, type BaselineSample, EstimateKind } from "../lib/build/as-bs.js";
 
 const require = createRequire(import.meta.url);
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const DEFAULT_GLOB = "assembly/__benches__/**/*.ts";
 const OUT_DIR = ".as-bench/build";
+const BASELINE_DIR = ".as-bench/baselines";
 
 // Host-side rendering thresholds (the engine doesn't use these).
 const SIGNIFICANCE_LEVEL = 0.05;
@@ -20,12 +21,22 @@ export interface RunFlags {
   tunes: TuneOverrides;
   verbose: boolean;
   buildOnly: boolean;
+  saveBaseline?: string;
+  baseline?: string;
+}
+
+// On-disk baseline format: .as-bench/baselines/<id>.json
+interface BaselineFile {
+  createdAt: string;
+  benches: Record<string, { sampleSize: number; iters: number[]; times: number[] }>;
 }
 
 export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: string[] } {
   const tunes: TuneOverrides = {};
   const selectors: string[] = [];
   let verbose = false;
+  let saveBaseline: string | undefined;
+  let baseline: string | undefined;
   const num = (name: string, v: string | undefined): number => {
     const n = Number(v);
     if (v === undefined || !Number.isFinite(n)) throw new Error(`${name} expects a number, got "${v}"`);
@@ -45,11 +56,17 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
       const idx = ["auto", "linear", "flat"].indexOf(mode ?? "");
       if (idx < 0) throw new Error(`--sampling expects auto|linear|flat, got "${mode}"`);
       tunes.samplingMode = idx;
+    } else if (a === "--save-baseline") {
+      saveBaseline = args[++i];
+      if (!saveBaseline || saveBaseline.startsWith("-")) throw new Error("--save-baseline expects an id");
+    } else if (a === "--baseline") {
+      baseline = args[++i];
+      if (!baseline || baseline.startsWith("-")) throw new Error("--baseline expects an id");
     } else if (a === "--verbose" || a === "-V") verbose = true;
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else selectors.push(a);
   }
-  return { flags: { tunes, verbose, buildOnly: false }, selectors };
+  return { flags: { tunes, verbose, buildOnly: false, saveBaseline, baseline }, selectors };
 }
 
 export async function findBenchFiles(selectors: string[]): Promise<string[]> {
@@ -126,6 +143,13 @@ export class Renderer implements BenchReporter {
   private suiteBaseline: string | null = null;
   private readonly tty = process.stdout.isTTY === true;
 
+  /** When set, `change` deltas are labeled against this baseline id. */
+  baselineId: string | null = null;
+  /** Saved-baseline lookup (wired by the CLI when --baseline is given). */
+  baselineSource: ((key: string, sampleCount: number) => BaselineSample | undefined) | null = null;
+  /** Raw-sample sink (wired by the CLI when --save-baseline is given). */
+  sampleSink: ((key: string, iters: Float64Array, times: Float64Array) => void) | null = null;
+
   constructor(private verbose: boolean) {}
 
   private status(text: string): void {
@@ -200,19 +224,37 @@ export class Renderer implements BenchReporter {
     console.log(`${chalk.bold(name)} time: [${formatTime(lb)} ${chalk.bold(formatTime(point))} ${formatTime(hb)}]`);
   }
 
-  suiteChange(lb: number, point: number, hb: number, pValue: number): void {
+  private renderDelta(lb: number, point: number, hb: number, pValue: number, vs: string): void {
     const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}%`;
     const significant = pValue < SIGNIFICANCE_LEVEL;
     const cmp = significant ? "<" : ">";
     let verdict: string;
-    if (!significant || (Math.abs(point) < NOISE_THRESHOLD && lb < 0 && hb > 0)) {
+    // criterion's rule: no change when insignificant OR the entire CI lies
+    // inside the noise band
+    if (!significant || (lb > -NOISE_THRESHOLD && hb < NOISE_THRESHOLD)) {
       verdict = chalk.dim("no change vs");
     } else if (point < 0) {
       verdict = chalk.green("faster than");
     } else {
       verdict = chalk.red("slower than");
     }
-    console.log(`${"".padEnd(24)} delta: [${pct(lb)} ${chalk.bold(pct(point))} ${pct(hb)}] (p = ${pValue.toFixed(2)} ${cmp} ${SIGNIFICANCE_LEVEL}) ${verdict} ${this.suiteBaseline}`);
+    console.log(`${"".padEnd(24)} delta: [${pct(lb)} ${chalk.bold(pct(point))} ${pct(hb)}] (p = ${pValue.toFixed(2)} ${cmp} ${SIGNIFICANCE_LEVEL}) ${verdict} ${vs}`);
+  }
+
+  suiteChange(lb: number, point: number, hb: number, pValue: number): void {
+    this.renderDelta(lb, point, hb, pValue, `${this.suiteBaseline}`);
+  }
+
+  change(lb: number, point: number, hb: number, pValue: number): void {
+    this.renderDelta(lb, point, hb, pValue, `baseline '${this.baselineId}'`);
+  }
+
+  sampleDone(key: string, iters: Float64Array, times: Float64Array): void {
+    this.sampleSink?.(key, iters, times);
+  }
+
+  getBaseline(key: string, sampleCount: number): BaselineSample | undefined {
+    return this.baselineSource?.(key, sampleCount);
   }
 
   outliers(los: number, lom: number, him: number, his: number): void {
@@ -233,6 +275,18 @@ export class Renderer implements BenchReporter {
 
 // --- commands -------------------------------------------------------------------
 
+function baselinePath(id: string): string {
+  return path.join(BASELINE_DIR, `${id.replace(/[^\w.-]/g, "_")}.json`);
+}
+
+function loadBaselineFile(id: string): BaselineFile {
+  const file = baselinePath(id);
+  if (!fs.existsSync(file)) {
+    throw new Error(`baseline '${id}' not found (expected ${file}); create it with --save-baseline ${id}`);
+  }
+  return JSON.parse(fs.readFileSync(file, "utf8")) as BaselineFile;
+}
+
 export async function executeRun(args: string[]): Promise<void> {
   const { flags, selectors } = parseRunFlags(args);
   const files = await findBenchFiles(selectors);
@@ -242,6 +296,10 @@ export async function executeRun(args: string[]): Promise<void> {
     return;
   }
 
+  const loaded = flags.baseline ? loadBaselineFile(flags.baseline) : null;
+  const collected: BaselineFile["benches"] = {};
+  const sizeMismatchWarned = new Set<string>();
+
   for (const file of files) {
     console.log(chalk.dim(`compiling ${file}`));
     const wasmPath = await buildBenchFile(file);
@@ -249,7 +307,38 @@ export async function executeRun(args: string[]): Promise<void> {
       console.log(chalk.dim(`built ${wasmPath}`));
       continue;
     }
-    await runBenchFile(wasmPath, new Renderer(flags.verbose), flags.tunes);
+
+    const fileKey = (key: string) => `${path.basename(file)}::${key}`;
+    const renderer = new Renderer(flags.verbose);
+    renderer.baselineId = flags.baseline ?? null;
+    if (loaded) {
+      renderer.baselineSource = (key, sampleCount) => {
+        const entry = loaded.benches[fileKey(key)];
+        if (!entry) return undefined;
+        if (entry.sampleSize !== sampleCount) {
+          if (!sizeMismatchWarned.has(key)) {
+            sizeMismatchWarned.add(key);
+            console.log(chalk.yellow(`warning: baseline '${flags.baseline}' for ${key} has ${entry.sampleSize} samples but this run uses ${sampleCount} — skipping comparison (match --samples to compare)`));
+          }
+          return undefined;
+        }
+        return entry;
+      };
+    }
+    if (flags.saveBaseline) {
+      renderer.sampleSink = (key, iters, times) => {
+        collected[fileKey(key)] = { sampleSize: iters.length, iters: Array.from(iters), times: Array.from(times) };
+      };
+    }
+
+    await runBenchFile(wasmPath, renderer, flags.tunes);
+  }
+
+  if (flags.saveBaseline && !flags.buildOnly) {
+    fs.mkdirSync(BASELINE_DIR, { recursive: true });
+    const out: BaselineFile = { createdAt: new Date().toISOString(), benches: collected };
+    fs.writeFileSync(baselinePath(flags.saveBaseline), JSON.stringify(out));
+    console.log(chalk.dim(`\nsaved baseline '${flags.saveBaseline}' (${Object.keys(collected).length} benches) to ${baselinePath(flags.saveBaseline)}`));
   }
 }
 

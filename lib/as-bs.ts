@@ -40,6 +40,12 @@ export interface TuneOverrides {
 
 const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime"];
 
+/** A saved benchmark sample: parallel per-sample iteration counts and times (ms). */
+export interface BaselineSample {
+  iters: ArrayLike<number>;
+  times: ArrayLike<number>;
+}
+
 /** Engine progress/result events. All optional; times are in milliseconds. */
 export interface BenchReporter {
   benchStart?(name: string): void;
@@ -59,6 +65,12 @@ export interface BenchReporter {
   /** Delta vs the suite's first bench: ratios (-0.38 = 38% faster). */
   suiteChange?(lb: number, point: number, hb: number, pValue: number): void;
   suiteEnd?(): void;
+  /** Raw sample for the bench `key` ("suite/name" or "name"); copies. */
+  sampleDone?(key: string, iters: Float64Array, times: Float64Array): void;
+  /** Supply a saved baseline for `key`, or undefined. Arrays must hold exactly `sampleCount` entries. */
+  getBaseline?(key: string, sampleCount: number): BaselineSample | undefined;
+  /** Delta vs the loaded baseline: ratios (-0.05 = 5% faster). */
+  change?(lb: number, point: number, hb: number, pValue: number): void;
 }
 
 // node:wasi prints an ExperimentalWarning on first import; not actionable for
@@ -86,6 +98,12 @@ function readString(memory: WebAssembly.Memory, ptr: number, len: number): strin
  * are constructed, and `memory.buffer` detaches on grow).
  */
 export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}): WebAssembly.ModuleImports {
+  // Track the current suite/bench so key-addressed callbacks (sampleDone,
+  // getBaseline) don't require every reporter to re-derive labels.
+  let suiteName: string | null = null;
+  let benchName = "";
+  const key = () => (suiteName !== null ? `${suiteName}/${benchName}` : benchName);
+
   return {
     now,
     tune(kind: number, value: number): number {
@@ -93,7 +111,10 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
       const override = key === undefined ? undefined : tunes[key];
       return override === undefined ? value : override;
     },
-    benchStart: (ptr: number, len: number) => reporter.benchStart?.(readString(getMem(), ptr, len)),
+    benchStart: (ptr: number, len: number) => {
+      benchName = readString(getMem(), ptr, len);
+      reporter.benchStart?.(benchName);
+    },
     warmupStarted: (ms: number) => reporter.warmupStarted?.(ms),
     warmupEnded: (elapsed: number, met: number, converged: number) => reporter.warmupEnded?.(elapsed, met, converged !== 0),
     measureStarted: (est: number, iters: number, samples: number) => reporter.measureStarted?.(est, iters, samples),
@@ -104,9 +125,30 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
     result: (lb: number, point: number, hb: number) => reporter.result?.(lb, point, hb),
     outliers: (los: number, lom: number, him: number, his: number) => reporter.outliers?.(los, lom, him, his),
     benchEnd: () => reporter.benchEnd?.(),
-    suiteStart: (ptr: number, len: number) => reporter.suiteStart?.(readString(getMem(), ptr, len)),
+    suiteStart: (ptr: number, len: number) => {
+      suiteName = readString(getMem(), ptr, len);
+      reporter.suiteStart?.(suiteName);
+    },
     suiteChange: (lb: number, point: number, hb: number, p: number) => reporter.suiteChange?.(lb, point, hb, p),
-    suiteEnd: () => reporter.suiteEnd?.(),
+    suiteEnd: () => {
+      suiteName = null;
+      reporter.suiteEnd?.();
+    },
+    sampleDone: (itersPtr: number, timesPtr: number, n: number) => {
+      if (!reporter.sampleDone) return;
+      const mem = getMem();
+      // slice() copies out of linear memory — the buffers are engine scratch
+      reporter.sampleDone(key(), new Float64Array(mem.buffer, itersPtr, n).slice(), new Float64Array(mem.buffer, timesPtr, n).slice());
+    },
+    loadBaseline: (timesPtr: number, itersPtr: number, n: number): number => {
+      const baseline = reporter.getBaseline?.(key(), n);
+      if (!baseline || baseline.times.length !== n || baseline.iters.length !== n) return 0;
+      const mem = getMem();
+      new Float64Array(mem.buffer, timesPtr, n).set(baseline.times as ArrayLike<number>);
+      new Float64Array(mem.buffer, itersPtr, n).set(baseline.iters as ArrayLike<number>);
+      return 1;
+    },
+    change: (lb: number, point: number, hb: number, p: number) => reporter.change?.(lb, point, hb, p),
   };
 }
 

@@ -246,6 +246,10 @@ let distMAD = new StaticArray<f64>(0);
 let mItersF = new StaticArray<f64>(0);
 let distFit = new StaticArray<f64>(0);
 
+// host-loaded baseline staging (filled by the loadBaseline import on demand)
+let baselineTimesBuf = new StaticArray<f64>(0);
+let baselineItersBuf = new StaticArray<f64>(0);
+
 function ensureBuffers(sampleSize: i32, numResamples: i32): void {
   if (sampleSize == bufSampleSize && numResamples == bufNumResamples) return;
 
@@ -259,6 +263,8 @@ function ensureBuffers(sampleSize: i32, numResamples: i32): void {
   sample = new StaticArray<f64>(sampleSize * 2);
   baseAvgTimes = new StaticArray<f64>(sampleSize);
   mItersF = new StaticArray<f64>(sampleSize);
+  baselineTimesBuf = new StaticArray<f64>(sampleSize);
+  baselineItersBuf = new StaticArray<f64>(sampleSize);
 
   tDist = new StaticArray<f64>(numResamples);
   distMeanChange = new StaticArray<f64>(numResamples);
@@ -401,8 +407,22 @@ export function runBench(name: string, routine: () => void): void {
     averageTimes[i] = res / (iters as f64);
   }
 
+  // expose the raw sample (iters as f64 + per-sample times) to the host —
+  // baseline saving and external tooling hang off this
+  for (let i = 0; i < cfgSampleSize; ++i) {
+    mItersF[i] = mIters[i] as f64;
+  }
+  host.sampleDone(changetype<usize>(mItersF), changetype<usize>(times), cfgSampleSize);
+
   host.analyzing();
   averageTimes.sort();
+
+  // saved-baseline comparison: pull (times, iters) from the host if it has a
+  // matching baseline for this bench (as-tral flags bit 0b1, pull-based here)
+  const hasBaseline = host.loadBaseline(changetype<usize>(baselineTimesBuf), changetype<usize>(baselineItersBuf), cfgSampleSize) != 0;
+  if (hasBaseline) {
+    compare(changetype<usize>(baselineTimesBuf), changetype<usize>(baselineItersBuf));
+  }
 
   // point estimates
   const meanPoint = Stats.mean(averageTimes);
@@ -446,10 +466,7 @@ export function runBench(name: string, routine: () => void): void {
     host.result(Stats.sorted.CI.LB(distMean), meanPoint, Stats.sorted.CI.HB(distMean));
   } else {
     flags |= FLAG_SLOPE;
-    for (let i = 0; i < cfgSampleSize; ++i) {
-      mItersF[i] = mIters[i] as f64;
-    }
-
+    // mItersF already filled for sampleDone above
     const slopePoint = Regression.fit(mItersF, times);
 
     // bivariate bootstrap over (iterations, time) pairs
@@ -467,6 +484,13 @@ export function runBench(name: string, routine: () => void): void {
     const slopeHB = Stats.sorted.CI.HB(distFit);
     host.estimate(4, slopeLB, slopePoint, slopeHB);
     host.result(slopeLB, slopePoint, slopeHB);
+  }
+
+  // report the saved-baseline delta before the suite block reuses the
+  // comparison state (distMeanChange/pValue are shared scratch)
+  if (hasBaseline) {
+    distMeanChange.sort();
+    host.change(Stats.sorted.CI.LB(distMeanChange), meanChangePoint, Stats.sorted.CI.HB(distMeanChange), pValue);
   }
 
   // suite-relative comparison: first bench is the baseline, the rest report
