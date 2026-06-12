@@ -114,11 +114,77 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
    `as-bench.config.json` + schema, `--config`/`--mode`, precedence
    defaults < config < mode < flags; `asb init` scaffolds. Remaining:
    browsers, node:bindings target.
-6. **`--heaviest=time`** — deferred pending design: wrapper-based per-function
-   timers give *inclusive* time (recursive functions over-attribute, nested
-   wrapper overhead compounds); needs self-time semantics (shadow-stack or
-   host-side call-graph reconstruction). `--heaviest=instr` covers exact
-   attribution meanwhile.
+6. **`--heaviest=time`** — design settled (2026-06-12), see below.
+   `--heaviest=instr` covers exact attribution meanwhile.
+
+## Design: `profile --heaviest=time` (2026-06-12)
+
+Per-function wall-time with **exact self-time** (recursion-safe) and
+**outermost-only inclusive time**, via wrapper outlining + child-time
+subtraction. No shadow stack in memory; the real call stack carries the
+bookkeeping in wrapper locals.
+
+**Accounting.** One shared mutable i64 global `__tprof_child`; per function
+`k`: exported `__tprof_self_<k>` (i64 ns), `__tprof_incl_<k>` (i64 ns),
+`__tprof_d_<k>` (i32 depth). Wrapper for `k`:
+
+```
+t0 = tnow(); saved = child; child = 0; d_k += 1
+r  = call $k$inner(...args)
+dur = tnow() - t0
+self_k += dur - child          ; subtract direct instrumented callees → self
+d_k -= 1; if d_k == 0: incl_k += dur   ; outermost frame only → no recursion double-count
+child = saved + dur            ; my whole duration is child-time to MY caller
+return r
+```
+
+Self-time is exact relative to instrumented callees; time in *skipped* or
+imported callees accrues to the caller (documented). Traps/abort leak one
+frame — run is over anyway.
+
+**Why outlining, not body injection:** epilogue-on-every-exit needs all
+`return`s rewritten and new locals added; a wrapper needs neither. The pass
+renames `k` → `k$inner`, creates the wrapper under the original name, then
+re-points **exports** and **element segments** (call_indirect — bench
+callbacks are function refs!) at the wrapper. Direct calls follow the name
+automatically.
+
+**Clock:** new injected import `__asbench.tnow(): i64` (ns), supplied by the
+node host as `process.hrtime.bigint()` — avoids `clock_time_get`'s
+pointer-to-memory result, which would need scratch memory the AS bump
+allocator doesn't know to avoid. =time is node-only for now; external
+runtimes would need the wasi-clock + reserved-scratch variant (future).
+
+**Overhead control & correction:**
+- ~2 host clock calls + 1 extra frame per call ≈ O(100ns)/call — fatal for
+  nano-functions if uncorrected. The pass also injects an exported empty
+  wrapped function `__tprof_calib`; the host calls it ~100k times, derives
+  per-call overhead, and subtracts `calls_k × overhead` per function
+  (floor 0). Render notes "overhead-corrected".
+- `--min-instrs <w>` (default ~16): reuse the instr pass's static region
+  weights to **skip wrapping trivial functions** (accessors etc.) — their
+  time folds into callers, slashing call volume. `--min-instrs 0` wraps all.
+- `--iters <n>` (default 10): new tune kind (next free: 10) loops the routine
+  n times in profileMode; percentages are n-independent, per-call divides.
+  Single-run times are clock-granularity noise for short routines.
+
+**Render:** per bench — total, then `%self  self  incl  calls  self/call
+name`, sorted by self, `isInternal` filter as in =instr. Caveat line: =time
+suits functions ≥ ~1µs self; below that =instr is the honest tool.
+
+**Validation:**
+1. `fib(20)`: incl ≈ self ≈ 100% (self-recursive — proves depth gating; naive
+   inclusive would report ~F(21)× over-attribution).
+2. empty function × 1M calls: corrected self ≈ 0 (calibration sanity).
+3. bubble sort: `__get` 55% by instrs — time% should correlate; with default
+   `--min-instrs` its time folds into the sort (document the contrast).
+4. a memory-thrashing bench where time% ≠ instr% (cache misses) — the
+   feature's reason to exist.
+
+**Steps:** (1) `instrumentTime()` in cli/instrument.ts (outline pass: rename,
+wrapper, exports + elem segments, calib fn); (2) `tnow` in benchImports;
+(3) engine profileIters tune (kind 10); (4) cli/profile.ts =time branch:
+instrument → run → calibrate → corrected table; (5) changelog + caveats.
 
 ## Attribution
 
