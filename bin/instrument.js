@@ -347,22 +347,30 @@ export async function instrumentTimeWasm(input, minWeight) {
 }
 // Allocation pass for `asb profile --heaviest=alloc`.
 //
-// The AS runtime's `~lib/rt/*/__new(size, id)` gets a prelude bumping two
-// shared monotone globals — `__aprof_b` (bytes requested) and `__aprof_a`
-// (allocation count). Every other user-level function is then outlined with
-// the same move-body wrapper as the time pass, but reading those globals
-// instead of a clock: the identical save/zero/restore algebra attributes
-// exact self bytes (own frame minus wrapped callees) and outermost-gated
-// inclusive bytes. Unlike =time this is overhead-free measurement — the
-// wrapper can't distort a byte counter — so results are exact and
-// deterministic, need no calibration, and wrap everything regardless of
-// size.
+// The runtime's allocation chokepoint gets a prelude bumping two shared
+// monotone globals — `__aprof_b` (bytes claimed) and `__aprof_a` (allocation
+// count). Every user-level function is then outlined with the same move-body
+// wrapper as the time pass, but reading those globals instead of a clock:
+// the identical save/zero/restore algebra attributes exact self bytes (own
+// frame minus wrapped callees) and outermost-gated inclusive bytes. Unlike
+// =time this is overhead-free measurement — the wrapper can't distort a
+// byte counter — so results are exact and deterministic, need no
+// calibration, and wrap everything regardless of size.
+//
+// Chokepoint selection: managed `__new` and unmanaged `__alloc` (heap.alloc)
+// both funnel into tlsf's `allocateBlock`, and asc -O inlines `__alloc` out
+// of existence — so instrument the DEEPEST layer that survives, and only
+// one layer, or managed allocations double-count. allocateBlock also
+// catches realloc/renew moves; in-place realloc growth claims no new block
+// and counts zero (the per-bench page report still shows real memory
+// growth). Sizes at allocateBlock include the 16-byte managed-object
+// header; heap.alloc sizes are exact as requested.
 //
 // `~lib/rt/*` itself is never wrapped: the allocator's bumps must land in
 // the frame of whoever asked for the memory, and runtime helpers
 // (__newArray etc.) should charge their user-level caller, not themselves.
-// Measures allocation pressure (bytes requested from __new, headers
-// excluded), not live or peak memory — GC frees don't subtract.
+// Measures allocation pressure, not live or peak memory — GC frees don't
+// subtract.
 export async function instrumentAllocWasm(input) {
   const binaryen = await loadBinaryen();
   const module = binaryen.readBinary(input);
@@ -429,24 +437,30 @@ export async function instrumentAllocWasm(input) {
     if (hasResult) body.push(module.local.get(RES, results));
     module.addFunction(name, params, results, vars, module.block(null, body, hasResult ? results : binaryen.none));
   };
+  // deepest-first chokepoint candidates; exactly one layer gets instrumented
+  const CHOKEPOINTS = [
+    { re: /^~lib\/rt\/tlsf\/allocateBlock$/, sizeParam: 1 }, // (root, size)
+    { re: /^~lib\/rt\/(tlsf|stub)\/__alloc$/, sizeParam: 0 }, // (size)
+    { re: /^~lib\/rt\/(itcms|stub|tlsf)\/__new$/, sizeParam: 0 }, // (size, id)
+  ];
   const targets = [];
-  const allocators = [];
+  const candidates = [];
   const numFns = raw._BinaryenGetNumFunctions(modPtr);
   for (let i = 0; i < numFns; i++) {
     const fnRef = raw._BinaryenGetFunctionByIndex(modPtr, i);
     const info = binaryen.getFunctionInfo(fnRef);
     if (!info.body) continue; // imported
-    if (/^~lib\/rt\/.*\/__new$/.test(info.name)) {
-      allocators.push({ ref: fnRef, body: info.body });
-      continue;
-    }
+    const level = CHOKEPOINTS.findIndex((c) => c.re.test(info.name));
+    if (level >= 0) candidates.push({ ref: fnRef, body: info.body, level, sizeParam: CHOKEPOINTS[level].sizeParam });
     if (info.name.startsWith("~lib/rt/")) continue; // charge runtime work to its caller
     if (binaryen.expandType(info.results).length > 1) continue; // multivalue: can't forward through one RES local
     targets.push({ name: info.name, params: info.params, results: info.results, vars: info.vars, body: info.body });
   }
-  // __new(size, id): bump the monotone counters with the requested size
-  for (const a of allocators) {
-    const prelude = [addToGlobal(BYTES, module.i64.extend_u(module.local.get(0, i32))), addToGlobal(ALLOCS, i64const(1n))];
+  // bump the monotone counters with the claimed size at the deepest layer present
+  const best = candidates.length > 0 ? Math.min(...candidates.map((c) => c.level)) : -1;
+  for (const a of candidates) {
+    if (a.level !== best) continue;
+    const prelude = [addToGlobal(BYTES, module.i64.extend_u(module.local.get(a.sizeParam, i32))), addToGlobal(ALLOCS, i64const(1n))];
     raw._BinaryenFunctionSetBody(a.ref, module.block(null, [...prelude, a.body], binaryen.auto));
   }
   const functions = [];
@@ -463,5 +477,5 @@ export async function instrumentAllocWasm(input) {
   }
   const wasm = module.emitBinary();
   module.dispose();
-  return { wasm, functions, hasAllocator: allocators.length > 0 };
+  return { wasm, functions, hasAllocator: candidates.length > 0 };
 }

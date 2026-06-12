@@ -319,7 +319,7 @@ function formatBytes(n: number): string {
 }
 
 function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, all: boolean, iters: number, hasAllocator: boolean): void {
-  console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(` (bytes requested from the allocator, exact; ${iters} iteration${iters === 1 ? "" : "s"} per bench)`));
+  console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(` (bytes claimed from the allocator, exact; ${iters} iteration${iters === 1 ? "" : "s"} per bench)`));
   if (!hasAllocator) console.log(chalk.dim("  module contains no AS runtime allocator (~lib/rt/*/__new) — nothing in it can allocate"));
   for (const p of profiles) {
     let total = 0n;
@@ -335,7 +335,7 @@ function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, a
     const hidden = p.rows.length - shown.length;
     if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
   }
-  console.log(chalk.dim(`\n  allocation pressure (bytes requested via __new, headers excluded), not live/peak memory — GC frees don't subtract.`));
+  console.log(chalk.dim(`\n  allocation pressure (bytes claimed from the allocator: __new incl. 16 B object header, heap.alloc, realloc moves), not live/peak — GC frees don't subtract.`));
   console.log(chalk.dim(`  self excludes wrapped callees; incl counts outermost frames only (recursion-safe).`));
 }
 

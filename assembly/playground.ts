@@ -157,9 +157,23 @@ function stringBuild(n: i32): i32 {
   return s.length;
 }
 
+// unmanaged path: heap.alloc/heap.free bypass the GC entirely (tlsf __alloc,
+// inlined into allocateBlock — the profiler counts at that chokepoint)
+function heapChurn(n: i32): i32 {
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const p = heap.alloc(256);
+    store<i32>(p, i);
+    acc += load<i32>(p);
+    heap.free(p);
+  }
+  return acc;
+}
+
 const arrayChurnRef: (n: i32) => i32 = arrayChurn;
 const oneBigBufferRef: (bytes: i32) => i32 = oneBigBuffer;
 const stringBuildRef: (n: i32) => i32 = stringBuild;
+const heapChurnRef: (n: i32) => i32 = heapChurn;
 
 suite("alloc", () => {
   bench("churn 64 x Array(16)", () => {
@@ -170,6 +184,9 @@ suite("alloc", () => {
   });
   bench("string += x64", () => {
     blackbox<i32>(stringBuildRef(blackbox<i32>(64)));
+  });
+  bench("heap.alloc 64 x 256 B", () => {
+    blackbox<i32>(heapChurnRef(blackbox<i32>(64)));
   });
 });
 
