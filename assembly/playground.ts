@@ -124,3 +124,50 @@ suite("arith", () => {
     blackbox<i32>(blackbox<i32>(6) * blackbox<i32>(7));
   });
 });
+
+// --- allocation pressure --------------------------------------------------------
+// Contrasting allocation patterns: many small objects vs one big buffer vs
+// string growing by repeated concat. Timed runs show the GC (itcms) cost of
+// each shape; `asb profile --heaviest=alloc assembly/playground.ts` shows the
+// exact bytes/allocs per function. The functions are called through function
+// refs (call_indirect) so --optimize can't inline them into the bench
+// callbacks — inlined functions vanish from profile attribution.
+
+function arrayChurn(n: i32): i32 {
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const a = new Array<i32>(16); // 2 allocs each: array object + backing buffer
+    a[0] = i;
+    acc += a[0] + a.length;
+  }
+  return acc;
+}
+
+function oneBigBuffer(bytes: i32): i32 {
+  const b = new Uint8Array(bytes);
+  b[0] = 1;
+  b[bytes - 1] = 2;
+  return b[0] + b[bytes - 1];
+}
+
+function stringBuild(n: i32): i32 {
+  let s = ""; // each += allocates a fresh, longer string — O(n²) bytes total
+  for (let i = 0; i < n; i++) s += "ab";
+  return s.length;
+}
+
+const arrayChurnRef: (n: i32) => i32 = arrayChurn;
+const oneBigBufferRef: (bytes: i32) => i32 = oneBigBuffer;
+const stringBuildRef: (n: i32) => i32 = stringBuild;
+
+suite("alloc", () => {
+  bench("churn 64 x Array(16)", () => {
+    blackbox<i32>(arrayChurnRef(blackbox<i32>(64)));
+  });
+  bench("one 16 KiB buffer", () => {
+    blackbox<i32>(oneBigBufferRef(blackbox<i32>(16384)));
+  });
+  bench("string += x64", () => {
+    blackbox<i32>(stringBuildRef(blackbox<i32>(64)));
+  });
+});
