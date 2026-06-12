@@ -1,16 +1,19 @@
 // Binaryen instrumentation pass for `asb profile --heaviest=instr`.
 //
-// Injects two mutable i64 globals per defined function — `__prof_c_<k>`
-// (entry count) and `__prof_n_<k>` (executed-instruction count) — both
-// exported so the host can snapshot/diff them around each bench.
+// Injects three mutable i64 globals per defined function — `__prof_c_<k>`
+// (entry count), `__prof_n_<k>` (executed-instruction count), and
+// `__prof_w_<k>` (cost-weighted instruction count) — all exported so the
+// host can snapshot/diff them around each bench.
 //
 // Counting model: every binaryen IR node ≈ one wasm instruction (structural
-// nodes — block, loop, nop — count as zero). Increments are inserted at
-// region granularity: function entry, each loop body, and each if-arm get
-// `__prof_n += <static weight of the region>` where a region's weight
-// excludes nested regions (they count themselves). Known imprecision: an
-// early `br`/`return` out of a region still pays the region's full weight —
-// fine for ranking, documented as "approximate".
+// nodes — block, loop, nop — count as zero). The weighted counter scales
+// each node by a static cost table (see costOf) so a division doesn't rank
+// equal to an add. Increments are inserted at region granularity: function
+// entry, each loop body, and each if-arm get `__prof_n += <count>` /
+// `__prof_w += <cost>` where a region's totals exclude nested regions (they
+// count themselves). Known imprecision: an early `br`/`return` out of a
+// region still pays the region's full weight — fine for ranking, documented
+// as "approximate".
 //
 // binaryen.js lacks JS wrappers for in-place mutation, so the three
 // re-parenting operations use the raw C API (_BinaryenFunctionSetBody,
@@ -58,6 +61,62 @@ export async function instrumentWasm(input) {
   const incr = (global, amount) => {
     return module.global.set(global, module.i64.add(module.global.get(global, i64), i64const(BigInt(amount))));
   };
+  // Static per-node cost table, in relative units ≈ modern-x86 latency
+  // class: 1 = ALU op / const / local traffic, loads 3 / stores 2 (L1
+  // assumption — cache behavior belongs to --heaviest=time), int mul 3,
+  // divisions/sqrt 12–15, calls 5 (indirect 8), atomics 10, memory.grow 100.
+  // Deliberately coarse and NOT timing-calibrated: per-instruction wall
+  // times aren't additive under superscalar execution, so a measured table
+  // would only pretend to more precision than exists.
+  // The unary and binary op enums overlap numerically (AddInt32 === ClzInt32
+  // === 0), so op sets are only consulted under their expression id.
+  const isFloat = (t) => t === binaryen.f32 || t === binaryen.f64;
+  const opSet = (ops) => new Set(ops.filter((o) => o !== undefined));
+  const b = binaryen;
+  const INT_DIV_OPS = opSet([b.DivSInt32, b.DivUInt32, b.RemSInt32, b.RemUInt32, b.DivSInt64, b.DivUInt64, b.RemSInt64, b.RemUInt64]);
+  const FLOAT_DIV_OPS = opSet([b.DivFloat32, b.DivFloat64]);
+  const INT_MUL_OPS = opSet([b.MulInt32, b.MulInt64]);
+  const SQRT_OPS = opSet([b.SqrtFloat32, b.SqrtFloat64]);
+  const TRUNC_OPS = opSet([b.TruncSFloat32ToInt32, b.TruncUFloat32ToInt32, b.TruncSFloat64ToInt32, b.TruncUFloat64ToInt32, b.TruncSFloat32ToInt64, b.TruncUFloat32ToInt64, b.TruncSFloat64ToInt64, b.TruncUFloat64ToInt64, b.TruncSatSFloat32ToInt32, b.TruncSatUFloat32ToInt32, b.TruncSatSFloat64ToInt32, b.TruncSatUFloat64ToInt32, b.TruncSatSFloat32ToInt64, b.TruncSatUFloat32ToInt64, b.TruncSatSFloat64ToInt64, b.TruncSatUFloat64ToInt64]);
+  const ATOMIC_IDS = opSet([b.AtomicRMWId, b.AtomicCmpxchgId, b.AtomicWaitId, b.AtomicNotifyId, b.AtomicFenceId]);
+  const costOf = (x) => {
+    switch (x.id) {
+      case binaryen.LoadId:
+        return x.isAtomic ? 10 : 3;
+      case binaryen.StoreId:
+        return x.isAtomic ? 10 : 2;
+      case binaryen.CallId:
+        return 5;
+      case binaryen.CallIndirectId:
+        return 8;
+      case binaryen.MemoryGrowId:
+        return 100;
+      case binaryen.MemoryCopyId:
+      case binaryen.MemoryFillId:
+        return 8;
+      case binaryen.BinaryId: {
+        const op = x.op;
+        if (INT_DIV_OPS.has(op)) return 15;
+        if (FLOAT_DIV_OPS.has(op)) return 12;
+        if (INT_MUL_OPS.has(op)) return 3;
+        // float arithmetic — compares yield i32, so peek the left operand
+        if (isFloat(x.type)) return 2;
+        const left = x.left;
+        if (left && raw._BinaryenExpressionGetId(left) !== binaryen.UnreachableId && isFloat(binaryen.getExpressionInfo(left).type)) return 2;
+        return 1;
+      }
+      case binaryen.UnaryId: {
+        const op = x.op;
+        if (SQRT_OPS.has(op)) return 12;
+        if (TRUNC_OPS.has(op)) return 3;
+        if (isFloat(x.type)) return 2;
+        return 1;
+      }
+      default:
+        if (ATOMIC_IDS.has(x.id)) return 10;
+        return ZERO_WEIGHT.has(x.id) ? 0 : 1;
+    }
+  };
   const functions = [];
   const numFns = raw._BinaryenGetNumFunctions(modPtr);
   for (let i = 0; i < numFns; i++) {
@@ -68,39 +127,48 @@ export async function instrumentWasm(input) {
     functions.push({ k, name: info.name });
     const cGlobal = `__prof_c_${k}`;
     const nGlobal = `__prof_n_${k}`;
-    module.addGlobal(cGlobal, i64, true, i64const(0n));
-    module.addGlobal(nGlobal, i64, true, i64const(0n));
-    module.addGlobalExport(cGlobal, cGlobal);
-    module.addGlobalExport(nGlobal, nGlobal);
-    // Walk the body counting the current region's weight; loop bodies and
-    // if-arms start their own regions (instrumented inside the recursion).
+    const wGlobal = `__prof_w_${k}`;
+    for (const g of [cGlobal, nGlobal, wGlobal]) {
+      module.addGlobal(g, i64, true, i64const(0n));
+      module.addGlobalExport(g, g);
+    }
+    // Walk the body totalling the current region's [count, cost]; loop
+    // bodies and if-arms start their own regions (instrumented inside the
+    // recursion).
     const walk = (ref) => {
       // this binaryen.js nightly's getExpressionInfo throws on `unreachable`;
       // it's a childless 1-instruction leaf either way
-      if (raw._BinaryenExpressionGetId(ref) === binaryen.UnreachableId) return 1;
+      if (raw._BinaryenExpressionGetId(ref) === binaryen.UnreachableId) return [1, 1];
       const x = binaryen.getExpressionInfo(ref);
-      let w = ZERO_WEIGHT.has(x.id) ? 0 : 1;
+      let n = ZERO_WEIGHT.has(x.id) ? 0 : 1;
+      let w = costOf(x);
       if (x.id === binaryen.IfId) {
         const ifInfo = x;
-        w += walk(ifInfo.condition);
-        wrapRegion(ifInfo.ifTrue, (b) => raw._BinaryenIfSetIfTrue(ref, b));
-        if (ifInfo.ifFalse) wrapRegion(ifInfo.ifFalse, (b) => raw._BinaryenIfSetIfFalse(ref, b));
+        const [cn, cw] = walk(ifInfo.condition);
+        n += cn;
+        w += cw;
+        wrapRegion(ifInfo.ifTrue, (b2) => raw._BinaryenIfSetIfTrue(ref, b2));
+        if (ifInfo.ifFalse) wrapRegion(ifInfo.ifFalse, (b2) => raw._BinaryenIfSetIfFalse(ref, b2));
       } else if (x.id === binaryen.LoopId) {
         const loopInfo = x;
-        wrapRegion(loopInfo.body, (b) => raw._BinaryenLoopSetBody(ref, b));
+        wrapRegion(loopInfo.body, (b2) => raw._BinaryenLoopSetBody(ref, b2));
       } else {
-        for (const child of childRefs(x)) w += walk(child);
+        for (const child of childRefs(x)) {
+          const [cn, cw] = walk(child);
+          n += cn;
+          w += cw;
+        }
       }
-      return w;
+      return [n, w];
     };
     const wrapRegion = (regionRef, replace) => {
-      const w = walk(regionRef);
-      if (w === 0) return;
-      replace(module.block(null, [incr(nGlobal, w), regionRef], binaryen.auto));
+      const [n, w] = walk(regionRef);
+      if (n === 0) return;
+      replace(module.block(null, [incr(nGlobal, n), incr(wGlobal, w), regionRef], binaryen.auto));
     };
-    const bodyWeight = walk(info.body);
+    const [bodyCount, bodyCost] = walk(info.body);
     const prelude = [incr(cGlobal, 1)];
-    if (bodyWeight > 0) prelude.push(incr(nGlobal, bodyWeight));
+    if (bodyCount > 0) prelude.push(incr(nGlobal, bodyCount), incr(wGlobal, bodyCost));
     raw._BinaryenFunctionSetBody(fnRef, module.block(null, [...prelude, info.body], binaryen.auto));
   }
   if (!module.validate()) {

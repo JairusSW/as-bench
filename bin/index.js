@@ -34,7 +34,8 @@ ${chalk.bold("Commands")}
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
   profile             Per-function work profile (instruction counts or wall-clock)
-    --heaviest=instr    Rank functions by executed instruction count (default, exact)
+    --heaviest=instr    Rank by cost-weighted instruction count (default; counts
+                        exact + deterministic, weights from a static cost table)
     --heaviest=time     Rank by wall-clock self time (overhead-corrected, recursion-safe)
     --top <n>           Rows per bench (default 10)
     --all               Include engine/runtime-internal rows

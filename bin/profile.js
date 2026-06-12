@@ -50,6 +50,7 @@ async function runProfiled(wasmPath, functions) {
     return {
       c: functions.map((f) => exp[`__prof_c_${f.k}`].value),
       n: functions.map((f) => exp[`__prof_n_${f.k}`].value),
+      w: functions.map((f) => exp[`__prof_w_${f.k}`].value),
     };
   };
   const profiles = [];
@@ -68,15 +69,18 @@ async function runProfiled(wasmPath, functions) {
       const end = snapshot();
       const rows = [];
       let total = 0n;
+      let totalCost = 0n;
       for (let i = 0; i < functions.length; i++) {
         const calls = end.c[i] - started.c[i];
         const instrs = end.n[i] - started.n[i];
         if (calls === 0n && instrs === 0n) continue;
+        const cost = end.w[i] - started.w[i];
         total += instrs;
-        rows.push({ name: functions[i].name, calls, instrs });
+        totalCost += cost;
+        rows.push({ name: functions[i].name, calls, instrs, cost });
       }
-      rows.sort((a, b) => (b.instrs > a.instrs ? 1 : b.instrs < a.instrs ? -1 : 0));
-      profiles.push({ key: suiteName !== null ? `${suiteName}/${benchName}` : benchName, total, rows });
+      rows.sort((a, b) => (b.cost > a.cost ? 1 : b.cost < a.cost ? -1 : 0));
+      profiles.push({ key: suiteName !== null ? `${suiteName}/${benchName}` : benchName, total, totalCost, rows });
       started = null;
     },
   };
@@ -219,14 +223,14 @@ function renderTime(file, profiles, top, all, iters, skipped, minInstrs) {
   console.log(chalk.dim(`  trust self times ≥ ~1µs — below that, clock granularity dominates; --heaviest=instr is exact.`));
 }
 function render(file, profiles, top, all) {
-  console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(" (wasm instructions, approximate; 1 run per bench)"));
+  console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(" (wasm instructions; counts exact, weights from a static cost table; 1 run per bench)"));
   for (const p of profiles) {
-    console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatCount(p.total)} instructions`);
+    console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatCount(p.totalCost)} weighted · ${formatCount(p.total)} instructions`);
     const rows = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
     for (const row of rows.slice(0, top)) {
-      const pct = p.total > 0n ? Number((row.instrs * 10000n) / p.total) / 100 : 0;
-      const perCall = row.calls > 0n ? formatCount(row.instrs / row.calls) : "-";
-      console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatCount(row.instrs).padStart(14)}  ${formatCount(row.calls).padStart(11)} calls  ${perCall.padStart(9)}/call  ${row.name}`);
+      const pct = p.totalCost > 0n ? Number((row.cost * 10000n) / p.totalCost) / 100 : 0;
+      const perCall = row.calls > 0n ? formatCount(row.cost / row.calls) : "-";
+      console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatCount(row.cost).padStart(14)} wt  ${formatCount(row.instrs).padStart(14)} instrs  ${formatCount(row.calls).padStart(11)} calls  ${perCall.padStart(9)} wt/call  ${row.name}`);
     }
     const hidden = p.rows.length - rows.length;
     if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
