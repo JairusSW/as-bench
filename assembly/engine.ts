@@ -287,7 +287,7 @@ function ensureBuffers(sampleSize: i32, numResamples: i32): void {
 // --- public engine entry points ----------------------------------------------
 
 export function beginSuite(name: string): void {
-  host.suiteStart(changetype<usize>(name), name.length);
+  host.suiteStart(name);
   flags |= FLAG_IN_SUITE;
   flags &= ~FLAG_SUITE_BASELINE;
 }
@@ -298,7 +298,7 @@ export function endSuite(): void {
 }
 
 export function runBench(name: string, routine: () => void): void {
-  host.benchStart(changetype<usize>(name), name.length);
+  host.benchStart(name);
 
   // resolve effective settings (host gets an override shot at each)
   cfgWarmupTime = host.tune(0, settings.warmupTime);

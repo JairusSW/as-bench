@@ -1,110 +1,244 @@
-// Host imports for the as-bench engine, all under the `__asbench` namespace.
-// The thin JS wrapper (lib/as-bs.ts) supplies these; everything else — the
-// whole statistics pipeline — runs inside the wasm. Strings cross the boundary
-// as (ptr, length-in-code-units) pairs decoded host-side as UTF-16LE.
+// Host interface for the as-bench engine. Two transports, selected at
+// compile time:
+//
+//  - default: the `__asbench` import namespace, supplied by the thin JS
+//    wrapper (lib/as-bs.ts). Strings cross as (ptr, UTF-16 code units).
+//  - AS_BENCH_WIPC builds (pure-WASI runtimes — wasmtime, wasmer, ...): all
+//    events stream out as WIPC-lite frames on stdout (util/wipc.ts), tune
+//    overrides arrive via AS_BENCH_TUNE_<kind> environment variables, and the
+//    module imports nothing beyond wasi_snapshot_preview1. Request/reply
+//    features degrade: loadBaseline always misses, iter() is a no-op
+//    (deterministic replay needs the node host).
+//
+// Everything else — the whole statistics pipeline — runs inside the wasm.
 
-/** High-resolution clock in milliseconds. The only import on the hot path. */
-// @ts-ignore: decorator
-@external("__asbench", "now")
-export declare function now(): f64;
+import * as wipc from "./wipc";
+
+namespace imports {
+  // @ts-ignore: decorator
+  @external("__asbench", "now")
+  export declare function now(): f64;
+  // @ts-ignore: decorator
+  @external("__asbench", "tune")
+  export declare function tune(kind: i32, value: f64): f64;
+  // @ts-ignore: decorator
+  @external("__asbench", "benchStart")
+  export declare function benchStart(ptr: usize, len: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "warmupStarted")
+  export declare function warmupStarted(durationMs: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "warmupEnded")
+  export declare function warmupEnded(elapsedMs: f64, met: f64, converged: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "measureStarted")
+  export declare function measureStarted(estimatedMs: f64, totalIters: f64, sampleCount: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "analyzing")
+  export declare function analyzing(): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "faultyConfig")
+  export declare function faultyConfig(linear: i32, actualMs: f64, recommendedSamples: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "faultyBenchmark")
+  export declare function faultyBenchmark(): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "sampleDone")
+  export declare function sampleDone(itersPtr: usize, timesPtr: usize, n: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "loadBaseline")
+  export declare function loadBaseline(timesPtr: usize, itersPtr: usize, n: i32): i32;
+  // @ts-ignore: decorator
+  @external("__asbench", "change")
+  export declare function change(lb: f64, point: f64, hb: f64, pValue: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "iter")
+  export declare function iter(): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "estimate")
+  export declare function estimate(kind: i32, lb: f64, point: f64, hb: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "result")
+  export declare function result(lb: f64, point: f64, hb: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "outliers")
+  export declare function outliers(los: i32, lom: i32, him: i32, his: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "benchEnd")
+  export declare function benchEnd(): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "suiteStart")
+  export declare function suiteStart(ptr: usize, len: i32): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "suiteChange")
+  export declare function suiteChange(lb: f64, point: f64, hb: f64, pValue: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "suiteEnd")
+  export declare function suiteEnd(): void;
+}
+
+/** High-resolution clock in milliseconds (engine fallback when not on WASI). */
+export function now(): f64 {
+  if (isDefined(AS_BENCH_WIPC)) {
+    return performance.now(); // WIPC builds are WASI builds
+  }
+  return imports.now();
+}
 
 /**
- * Settings override hook. Called once per setting at each bench start with the
- * in-wasm value; the host returns either an override (CLI flag) or the value
- * unchanged. Kinds: 0 warmupTime, 1 measurementTime, 2 sampleSize,
- * 3 numResamples, 4 samplingMode, 5 confidenceLevel, 6 warmupTolerance,
- * 7 warmupMinTime, 8 profileMode (host-only; 1 = run routine once, no stats),
- * 9 deterministic (host-only; 1 = signal each routine invocation via iter()).
+ * Settings override hook. Kinds: 0 warmupTime, 1 measurementTime,
+ * 2 sampleSize, 3 numResamples, 4 samplingMode, 5 confidenceLevel,
+ * 6 warmupTolerance, 7 warmupMinTime, 8 profileMode (host-only),
+ * 9 deterministic (host-only).
  */
-// @ts-ignore: decorator
-@external("__asbench", "tune")
-export declare function tune(kind: i32, value: f64): f64;
+export function tune(kind: i32, value: f64): f64 {
+  if (isDefined(AS_BENCH_WIPC)) {
+    const key = `AS_BENCH_TUNE_${kind}`;
+    if (process.env.has(key)) {
+      return F64.parseFloat(process.env.get(key));
+    }
+    return value;
+  }
+  return imports.tune(kind, value);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "benchStart")
-export declare function benchStart(ptr: usize, len: i32): void;
+export function benchStart(name: string): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.benchStart(name);
+    return;
+  }
+  imports.benchStart(changetype<usize>(name), name.length);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "warmupStarted")
-export declare function warmupStarted(durationMs: f64): void;
+export function suiteStart(name: string): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.suiteStart(name);
+    return;
+  }
+  imports.suiteStart(changetype<usize>(name), name.length);
+}
 
-/**
- * Deterministic mode: fired before every routine invocation so the host's
- * record/replay harness can manage tape boundaries.
- */
-// @ts-ignore: decorator
-@external("__asbench", "iter")
-export declare function iter(): void;
+export function warmupStarted(durationMs: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.warmupStarted(durationMs);
+    return;
+  }
+  imports.warmupStarted(durationMs);
+}
 
-/** Warmup finished; converged=1 when met stabilized before the time cap. */
-// @ts-ignore: decorator
-@external("__asbench", "warmupEnded")
-export declare function warmupEnded(elapsedMs: f64, met: f64, converged: i32): void;
+export function warmupEnded(elapsedMs: f64, met: f64, converged: i32): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.warmupEnded(elapsedMs, met, converged);
+    return;
+  }
+  imports.warmupEnded(elapsedMs, met, converged);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "measureStarted")
-export declare function measureStarted(estimatedMs: f64, totalIters: f64, sampleCount: i32): void;
+export function measureStarted(estimatedMs: f64, totalIters: f64, sampleCount: i32): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.measureStarted(estimatedMs, totalIters, sampleCount);
+    return;
+  }
+  imports.measureStarted(estimatedMs, totalIters, sampleCount);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "analyzing")
-export declare function analyzing(): void;
+export function analyzing(): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.analyzing();
+    return;
+  }
+  imports.analyzing();
+}
 
-/** The configured measurement time cannot fit the sampling plan. */
-// @ts-ignore: decorator
-@external("__asbench", "faultyConfig")
-export declare function faultyConfig(linear: i32, actualMs: f64, recommendedSamples: f64): void;
+export function faultyConfig(linear: i32, actualMs: f64, recommendedSamples: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.faultyConfig(linear, actualMs, recommendedSamples);
+    return;
+  }
+  imports.faultyConfig(linear, actualMs, recommendedSamples);
+}
 
-/** A sample measured 0ms — timer resolution too low or routine optimized away. */
-// @ts-ignore: decorator
-@external("__asbench", "faultyBenchmark")
-export declare function faultyBenchmark(): void;
+export function faultyBenchmark(): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.faultyBenchmark();
+    return;
+  }
+  imports.faultyBenchmark();
+}
 
-/** Raw sample exposure: n f64 iteration counts + n f64 sample times (ms). */
-// @ts-ignore: decorator
-@external("__asbench", "sampleDone")
-export declare function sampleDone(itersPtr: usize, timesPtr: usize, n: i32): void;
+export function sampleDone(itersPtr: usize, timesPtr: usize, n: i32): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.sampleDone(itersPtr, timesPtr, n);
+    return;
+  }
+  imports.sampleDone(itersPtr, timesPtr, n);
+}
 
-/**
- * Baseline pull: the host writes n f64 times + n f64 iters into the given
- * engine buffers and returns 1 when it has a baseline for the current bench
- * with a matching sample count; 0 otherwise.
- */
-// @ts-ignore: decorator
-@external("__asbench", "loadBaseline")
-export declare function loadBaseline(timesPtr: usize, itersPtr: usize, n: i32): i32;
+export function loadBaseline(timesPtr: usize, itersPtr: usize, n: i32): i32 {
+  if (isDefined(AS_BENCH_WIPC)) {
+    return 0; // request/reply needs the node host
+  }
+  return imports.loadBaseline(timesPtr, itersPtr, n);
+}
 
-/** Delta vs the loaded baseline: bounds are ratios (e.g. -0.05 = 5% faster). */
-// @ts-ignore: decorator
-@external("__asbench", "change")
-export declare function change(lb: f64, point: f64, hb: f64, pValue: f64): void;
+export function change(lb: f64, point: f64, hb: f64, pValue: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    return; // unreachable: loadBaseline never hits under WIPC
+  }
+  imports.change(lb, point, hb, pValue);
+}
 
-/** Estimate kinds: 0 mean, 1 median, 2 stdDev, 3 MAD, 4 slope. */
-// @ts-ignore: decorator
-@external("__asbench", "estimate")
-export declare function estimate(kind: i32, lb: f64, point: f64, hb: f64): void;
+export function iter(): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    return; // deterministic replay needs the node host
+  }
+  imports.iter();
+}
 
-/** Headline time: slope when linear sampling, mean when flat. */
-// @ts-ignore: decorator
-@external("__asbench", "result")
-export declare function result(lb: f64, point: f64, hb: f64): void;
+export function estimate(kind: i32, lb: f64, point: f64, hb: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.estimate(kind, lb, point, hb);
+    return;
+  }
+  imports.estimate(kind, lb, point, hb);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "outliers")
-export declare function outliers(los: i32, lom: i32, him: i32, his: i32): void;
+export function result(lb: f64, point: f64, hb: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.result(lb, point, hb);
+    return;
+  }
+  imports.result(lb, point, hb);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "benchEnd")
-export declare function benchEnd(): void;
+export function outliers(los: i32, lom: i32, him: i32, his: i32): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.outliers(los, lom, him, his);
+    return;
+  }
+  imports.outliers(los, lom, him, his);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "suiteStart")
-export declare function suiteStart(ptr: usize, len: i32): void;
+export function benchEnd(): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.benchEnd();
+    return;
+  }
+  imports.benchEnd();
+}
 
-/** Delta vs the suite's first bench: bounds are ratios (e.g. -0.38 = -38%). */
-// @ts-ignore: decorator
-@external("__asbench", "suiteChange")
-export declare function suiteChange(lb: f64, point: f64, hb: f64, pValue: f64): void;
+export function suiteChange(lb: f64, point: f64, hb: f64, pValue: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.suiteChange(lb, point, hb, pValue);
+    return;
+  }
+  imports.suiteChange(lb, point, hb, pValue);
+}
 
-// @ts-ignore: decorator
-@external("__asbench", "suiteEnd")
-export declare function suiteEnd(): void;
+export function suiteEnd(): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.suiteEnd();
+    return;
+  }
+  imports.suiteEnd();
+}

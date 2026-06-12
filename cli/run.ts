@@ -1,10 +1,12 @@
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import chalk from "chalk";
 import { glob } from "glob";
-import { runBenchFile, type BenchReporter, type TuneOverrides, type BaselineSample, EstimateKind } from "../lib/build/as-bs.js";
+import { runBenchFile, TUNE_KEYS, type BenchReporter, type TuneOverrides, type BaselineSample, EstimateKind } from "../lib/build/as-bs.js";
+import { FrameParser } from "../lib/build/wipc.js";
 
 const require = createRequire(import.meta.url);
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,7 +25,16 @@ export interface RunFlags {
   buildOnly: boolean;
   saveBaseline?: string;
   baseline?: string;
+  /** "node" (in-process, default) or an external WASI runtime. */
+  runtime: string;
 }
+
+// How to invoke known external runtimes: argv builder given env pairs + file.
+const RUNTIME_TEMPLATES: Record<string, (env: string[], file: string) => { cmd: string; args: string[] }> = {
+  wasmtime: (env, file) => ({ cmd: "wasmtime", args: ["run", ...env.map((e) => `--env=${e}`), file] }),
+  wasmer: (env, file) => ({ cmd: "wasmer", args: ["run", ...env.map((e) => `--env=${e}`), file] }),
+  wazero: (env, file) => ({ cmd: "wazero", args: ["run", ...env.flatMap((e) => ["-env", e]), file] }),
+};
 
 // On-disk baseline format: .as-bench/baselines/<id>.json
 interface BaselineFile {
@@ -37,6 +48,7 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
   let verbose = false;
   let saveBaseline: string | undefined;
   let baseline: string | undefined;
+  let runtime = "node";
   const num = (name: string, v: string | undefined): number => {
     const n = Number(v);
     if (v === undefined || !Number.isFinite(n)) throw new Error(`${name} expects a number, got "${v}"`);
@@ -63,11 +75,14 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
       baseline = args[++i];
       if (!baseline || baseline.startsWith("-")) throw new Error("--baseline expects an id");
     } else if (a === "--deterministic") tunes.deterministic = 1;
-    else if (a === "--verbose" || a === "-V") verbose = true;
+    else if (a === "--runtime") {
+      runtime = args[++i] ?? "";
+      if (!runtime || runtime.startsWith("-")) throw new Error("--runtime expects node|wasmtime|wasmer|wazero or a command template containing <file>");
+    } else if (a === "--verbose" || a === "-V") verbose = true;
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else selectors.push(a);
   }
-  return { flags: { tunes, verbose, buildOnly: false, saveBaseline, baseline }, selectors };
+  return { flags: { tunes, verbose, buildOnly: false, saveBaseline, baseline, runtime }, selectors };
 }
 
 export async function findBenchFiles(selectors: string[]): Promise<string[]> {
@@ -276,6 +291,42 @@ export class Renderer implements BenchReporter {
 
 // --- commands -------------------------------------------------------------------
 
+/** Run a WIPC build under an external WASI runtime, streaming frames to the reporter. */
+async function runExternal(runtime: string, wasmPath: string, reporter: BenchReporter, tunes: TuneOverrides): Promise<void> {
+  // settings overrides travel as AS_BENCH_TUNE_<kind> env vars
+  const envPairs: string[] = [];
+  for (let kind = 0; kind < TUNE_KEYS.length; kind++) {
+    const v = tunes[TUNE_KEYS[kind]];
+    if (v !== undefined) envPairs.push(`AS_BENCH_TUNE_${kind}=${v}`);
+  }
+
+  const template = RUNTIME_TEMPLATES[runtime];
+  let cmd: string;
+  let args: string[];
+  if (template) {
+    ({ cmd, args } = template(envPairs, wasmPath));
+  } else if (runtime.includes("<file>")) {
+    const parts = runtime.split(/\s+/).map((p) => (p === "<file>" ? wasmPath : p));
+    cmd = parts[0];
+    args = parts.slice(1);
+  } else {
+    throw new Error(`unknown runtime "${runtime}" — use node|${Object.keys(RUNTIME_TEMPLATES).join("|")} or a command template containing <file>`);
+  }
+
+  const parser = new FrameParser(reporter, (bytes) => process.stdout.write(bytes));
+  const childEnv = { ...process.env, ...Object.fromEntries(envPairs.map((e) => e.split("=") as [string, string])) };
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "inherit"], env: childEnv });
+    child.stdout.on("data", (chunk: Buffer) => parser.push(new Uint8Array(chunk)));
+    child.on("error", (err) => reject(new Error(`failed to spawn ${cmd}: ${err.message}`)));
+    child.on("close", (code) => {
+      parser.end();
+      if (code !== 0) reject(new Error(`${cmd} exited with code ${code}`));
+      else resolve();
+    });
+  });
+}
+
 function baselinePath(id: string): string {
   return path.join(BASELINE_DIR, `${id.replace(/[^\w.-]/g, "_")}.json`);
 }
@@ -297,16 +348,28 @@ export async function executeRun(args: string[]): Promise<void> {
     return;
   }
 
-  const loaded = flags.baseline ? loadBaselineFile(flags.baseline) : null;
+  const external = flags.runtime !== "node";
+  if (external && flags.tunes.deterministic === 1) {
+    throw new Error("--deterministic requires the node host (record/replay wraps imports in-process)");
+  }
+  if (external && flags.baseline) {
+    console.log(chalk.yellow(`warning: --baseline comparison needs the node host (request/reply); external runs can still --save-baseline`));
+  }
+
+  const loaded = !external && flags.baseline ? loadBaselineFile(flags.baseline) : null;
   const collected: BaselineFile["benches"] = {};
   const sizeMismatchWarned = new Set<string>();
 
   const deterministic = flags.tunes.deterministic === 1;
   for (const file of files) {
-    console.log(chalk.dim(`compiling ${file}${deterministic ? " (deterministic)" : ""}`));
+    console.log(chalk.dim(`compiling ${file}${deterministic ? " (deterministic)" : ""}${external ? ` (wipc, runtime: ${flags.runtime})` : ""}`));
     // deterministic builds route engine timing through the passthrough host
-    // import so the WASI clock stays recordable for user code
-    const wasmPath = deterministic ? await buildBenchFile(file, ["--use", "AS_BENCH_DETERMINISTIC=1"], ".det") : await buildBenchFile(file);
+    // import so the WASI clock stays recordable for user code; external
+    // runtimes get the WIPC build whose only imports are wasi_snapshot_preview1
+    let wasmPath: string;
+    if (external) wasmPath = await buildBenchFile(file, ["--use", "AS_BENCH_WIPC=1"], ".wipc");
+    else if (deterministic) wasmPath = await buildBenchFile(file, ["--use", "AS_BENCH_DETERMINISTIC=1"], ".det");
+    else wasmPath = await buildBenchFile(file);
     if (flags.buildOnly) {
       console.log(chalk.dim(`built ${wasmPath}`));
       continue;
@@ -335,7 +398,11 @@ export async function executeRun(args: string[]): Promise<void> {
       };
     }
 
-    await runBenchFile(wasmPath, renderer, flags.tunes);
+    if (external) {
+      await runExternal(flags.runtime, wasmPath, renderer, flags.tunes);
+    } else {
+      await runBenchFile(wasmPath, renderer, flags.tunes);
+    }
   }
 
   if (flags.saveBaseline && !flags.buildOnly) {
@@ -355,9 +422,10 @@ export async function executeBuild(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const external = flags.runtime !== "node";
   for (const file of files) {
-    console.log(chalk.dim(`compiling ${file}`));
-    const wasmPath = await buildBenchFile(file);
+    console.log(chalk.dim(`compiling ${file}${external ? " (wipc)" : ""}`));
+    const wasmPath = external ? await buildBenchFile(file, ["--use", "AS_BENCH_WIPC=1"], ".wipc") : await buildBenchFile(file);
     console.log(chalk.dim(`built ${wasmPath}`));
   }
 }

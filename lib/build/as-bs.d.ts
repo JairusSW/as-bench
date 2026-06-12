@@ -21,6 +21,7 @@ export interface TuneOverrides {
     profileMode?: number;
     deterministic?: number;
 }
+export declare const TUNE_KEYS: (keyof TuneOverrides)[];
 export interface BaselineSample {
     iters: ArrayLike<number>;
     times: ArrayLike<number>;

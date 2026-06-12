@@ -43,7 +43,8 @@ export interface TuneOverrides {
   deterministic?: number; // 1 = record host imports on iteration 2, replay after
 }
 
-const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime", "profileMode", "deterministic"];
+/** Tune kind order — index = the engine's tune kind (and AS_BENCH_TUNE_<kind> env var). */
+export const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime", "profileMode", "deterministic"];
 
 /** A saved benchmark sample: parallel per-sample iteration counts and times (ms). */
 export interface BaselineSample {
