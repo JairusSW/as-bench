@@ -95,12 +95,12 @@ function resolveWasiShimConfig(): string {
   return path.relative(process.cwd(), resolved);
 }
 
-export async function buildBenchFile(file: string): Promise<string> {
+export async function buildBenchFile(file: string, extraArgs: string[] = []): Promise<string> {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const outWasm = path.join(OUT_DIR, path.basename(file).replace(/\.ts$/, ".wasm"));
 
   const asc = await import("assemblyscript/dist/asc.js");
-  const argv = [file, "--transform", path.join(PKG_ROOT, "transform/lib/index.js"), "--config", resolveWasiShimConfig(), "--outFile", outWasm, "--optimize"];
+  const argv = [file, "--transform", path.join(PKG_ROOT, "transform/lib/index.js"), "--config", resolveWasiShimConfig(), "--outFile", outWasm, "--optimize", ...extraArgs];
   const { error, stderr } = await asc.main(argv);
   if (error) {
     process.stderr.write(stderr.toString());

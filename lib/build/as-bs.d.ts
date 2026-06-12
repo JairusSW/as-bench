@@ -16,6 +16,7 @@ export interface TuneOverrides {
     confidenceLevel?: number;
     warmupTolerance?: number;
     warmupMinTime?: number;
+    profileMode?: number;
 }
 export interface BaselineSample {
     iters: ArrayLike<number>;

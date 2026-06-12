@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import chalk from "chalk";
 import { executeRun, executeBuild } from "./run.js";
+import { executeProfile } from "./profile.js";
 
 // Bumped in lockstep with package.json; the scaffold keeps it inline rather
 // than importing JSON to avoid ESM import-assertion friction in the bin.
@@ -25,9 +26,11 @@ ${chalk.bold("Commands")}
     --baseline <id>     Compare each bench against a saved baseline
     --verbose, -V       Print all estimates (mean/median/std dev/MAD/slope)
   build               Compile benchmarks without running
-  profile             Count work per call (not yet implemented)
-    --heaviest=instr    Rank calls by wasm instruction count (default)
-    --heaviest=time     Rank calls by per-function wall-clock
+  profile             Tier-free work profile: wasm instruction counts per call
+    --heaviest=instr    Rank functions by executed instruction count (default)
+    --heaviest=time     Rank by per-function wall-clock (not yet implemented)
+    --top <n>           Rows per bench (default 10)
+    --all               Include engine/runtime-internal rows
   init                Scaffold an as-bench config (not yet implemented)
 
   help, --help, -h    Show this help
@@ -62,6 +65,8 @@ async function main(argv: string[]): Promise<void> {
       await executeBuild(rest);
       return;
     case "profile":
+      await executeProfile(rest);
+      return;
     case "init":
       notImplemented(cmd);
       return;

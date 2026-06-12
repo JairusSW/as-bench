@@ -92,7 +92,14 @@ Three independent build targets, each rebuilt after changes (mirrors as-test):
    pull-based `loadBaseline` host hook feeds the engine's existing compare().
 3. **Port `replay/`** verbatim; wire into `lib/as-bs.ts` as deterministic mode;
    add the passthrough exclude-set + auto-rewind; de-risk heap-drift.
-4. **Transform instrumentation pass** (Binaryen) → `profile --heaviest=instr`.
+4. ~~**Instrumentation pass** → `profile --heaviest=instr`~~ — done (lives in
+   `cli/instrument.ts` as a post-compile binaryen.js pass, not an asc
+   transform; binaryen resolved from the installed assemblyscript's pin).
+   Region-granular counting (function entry / loop body / if-arm); known
+   imprecision: early `br`/`return` still pays its region's full weight.
+   Engine `profileMode` (tune kind 8) runs routines exactly once.
+   Finding while validating: asc `--optimize` does NOT inline StaticArray
+   bounds-checked accessors — `__get` was 55% of bubble sort's instructions.
 5. **`--heaviest=time`** timers + baseline comparison reporting + runtime-matrix
    config modes (node:bindings / node:wasi / wasmtime / browsers).
 

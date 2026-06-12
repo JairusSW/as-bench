@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `asb profile` (--heaviest=instr): tier-free work profiling. A binaryen pass injects per-function `calls` + executed-instruction counters (region granularity: function entry, loop bodies, if-arms; exported i64 globals), the engine's new profile mode runs each routine exactly once, and the CLI renders per-bench tables (%, instrs, calls, instrs/call). Engine overhead inside the counted window: 6 instructions. Fully deterministic — identical totals across runs and builds. Validated analytically: fib(20) reports exactly 21,891 calls (= 2·F(21)−1). `--top`, `--all` flags; `--heaviest=time` reserved.
+- Profile builds add `--debug` for the name section only — verified bit-identical instruction totals with and without.
+
 - Port the as-tral/Criterion statistics engine into `assembly/engine.ts` (Apache-2.0 attributed): warmup, auto/linear/flat sampling, bootstrap CIs (mean/median/std dev/MAD/slope), Welch-t + permutation p-value comparison, Tukey outliers. Fixes as-tral's resample-median bug.
 - `bench()` now measures for real; `suite()` reports each bench's delta vs the suite's first bench.
 - `__asbench` host-import namespace in `lib/as-bs.ts`: `now`, `tune` (settings overrides), progress/result events; `runBenchFile()` runs a compiled bench under WASI with a pluggable reporter.

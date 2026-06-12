@@ -36,9 +36,10 @@ export interface TuneOverrides {
   confidenceLevel?: number;
   warmupTolerance?: number; // relative met drift considered stable; 0 = fixed-time warmup
   warmupMinTime?: number; // never judge stability before this many ms
+  profileMode?: number; // 1 = run each routine exactly once, no statistics
 }
 
-const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime"];
+const TUNE_KEYS: (keyof TuneOverrides)[] = ["warmupTime", "measurementTime", "sampleSize", "numResamples", "samplingMode", "confidenceLevel", "warmupTolerance", "warmupMinTime", "profileMode"];
 
 /** A saved benchmark sample: parallel per-sample iteration counts and times (ms). */
 export interface BaselineSample {

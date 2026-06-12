@@ -13,7 +13,7 @@ export declare function now(): f64;
  * in-wasm value; the host returns either an override (CLI flag) or the value
  * unchanged. Kinds: 0 warmupTime, 1 measurementTime, 2 sampleSize,
  * 3 numResamples, 4 samplingMode, 5 confidenceLevel, 6 warmupTolerance,
- * 7 warmupMinTime.
+ * 7 warmupMinTime, 8 profileMode (host-only; 1 = run routine once, no stats).
  */
 // @ts-ignore: decorator
 @external("__asbench", "tune")

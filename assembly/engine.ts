@@ -304,6 +304,17 @@ export function runBench(name: string, routine: () => void): void {
   cfgConfidenceLevel = host.tune(5, settings.confidenceLevel);
   const warmupTolerance = host.tune(6, settings.warmupTolerance);
   const warmupMinTime = host.tune(7, settings.warmupMinTime);
+
+  // profile mode (host-only, tune kind 8): run the routine exactly once and
+  // report nothing — instruction counters in an instrumented build do the
+  // measuring. Early return keeps engine allocations out of the counted
+  // window (host snapshots counters at benchStart/benchEnd).
+  if (<i32>host.tune(8, 0) != 0) {
+    routine();
+    host.benchEnd();
+    return;
+  }
+
   cfgSampleSize = sampleSize;
   cfgNumResamples = numResamples;
   ensureBuffers(sampleSize, numResamples);
