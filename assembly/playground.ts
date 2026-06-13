@@ -187,7 +187,6 @@ class Vec3 {
   z: f64 = 0;
 }
 
-
 @json
 class Player {
   firstName!: string;
@@ -206,30 +205,14 @@ const player: Player = {
 };
 const playerJson = JSON.stringify<Player>(player);
 
-function stringifyPlayer(p: Player): string {
-  return JSON.stringify<Player>(p);
-}
-
-function parsePlayer(s: string): Player {
-  return JSON.parse<Player>(s);
-}
-
-function parsePlayerNoAlloc(s: string): Player {
-  return JSON.parse<Player>(s, player);
-}
-
-const stringifyRef: (p: Player) => string = stringifyPlayer;
-const parseRef: (s: string) => Player = parsePlayer;
-const parseRefNoAlloc: (s: string) => Player = parsePlayerNoAlloc;
-
 suite("json-as", () => {
   bench("stringify Player", () => {
-    blackbox<string>(stringifyRef(blackbox<Player>(player)));
+    blackbox<string>(JSON.stringify<Player>(blackbox<Player>(player)));
   });
   bench("parse Player", () => {
-    blackbox<Player>(parseRef(blackbox<string>(playerJson)));
+    blackbox<Player>(JSON.parse<Player>(blackbox<string>(playerJson)));
   });
   bench("parse Player (no alloc)", () => {
-    blackbox<Player>(parseRefNoAlloc(blackbox<string>(playerJson)));
+    blackbox<Player>(JSON.parse<Player>(blackbox<string>(playerJson), player));
   });
 });
