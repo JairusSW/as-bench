@@ -16,8 +16,8 @@ export class Settings {
   warmupTime: f64 = 3000; // ms — cap; adaptive warmup may exit earlier
   warmupMinTime: f64 = 100; // ms — never judge stability before this
   warmupTolerance: f64 = 0.02; // relative met drift considered stable; 0 = always warm the full warmupTime
-  measurementTime: f64 = 5000; // ms
-  sampleSize: i32 = 100; // samples collected
+  measurementTime: f64 = 3000; // ms
+  sampleSize: i32 = 0; // 0 = auto-sized from warmup met
   numResamples: i32 = 100000; // bootstrap resamples
   samplingMode: SamplingMode = SamplingMode.Auto;
   confidenceLevel: f64 = 0.95;

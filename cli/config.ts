@@ -6,7 +6,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { TuneOverrides } from "../lib/build/as-bs.js";
+import type { TuneOverrides } from "../lib/build/host.js";
 
 export interface SettingsConfig {
   /** Warmup time cap in ms (adaptive warmup may exit earlier). */

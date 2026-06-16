@@ -1,4 +1,4 @@
-import type { BenchReporter } from "./as-bs.js";
+import type { BenchReporter } from "./host.js";
 export declare class FrameParser {
     private reporter;
     private passthrough;

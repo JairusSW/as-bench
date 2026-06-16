@@ -77,6 +77,10 @@ export interface BenchReporter {
   getBaseline?(key: string, sampleCount: number): BaselineSample | undefined;
   /** Delta vs the loaded baseline: ratios (-0.05 = 5% faster). */
   change?(lb: number, point: number, hb: number, pValue: number): void;
+  /** Throughput in elements/s (lb/point/hb). Only fired when `elementsPerCall > 0` in `bench()`. */
+  throughput?(lb: number, point: number, hb: number): void;
+  /** Fired after suiteEnd when `.chart()` was called on the suite handle. */
+  suiteChart?(name: string, type: string): void;
 }
 
 // node:wasi prints an ExperimentalWarning on first import; not actionable for
@@ -102,8 +106,12 @@ function readString(memory: WebAssembly.Memory, ptr: number, len: number): strin
  * Build the `__asbench` import namespace the engine links against. `getMem` is
  * a thunk resolved at call time (the instance doesn't exist yet when imports
  * are constructed, and `memory.buffer` detaches on grow).
+ *
+ * `filter` (optional): a function that returns true for bench names that
+ * should run. The engine calls `shouldSkip` at each bench start and skips the
+ * full warmup+sampling loop for non-matching benches. When null, all benches run.
  */
-export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, harness: DeterministicHarness | null = null): WebAssembly.ModuleImports {
+export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, harness: DeterministicHarness | null = null, filter: ((name: string) => boolean) | null = null): WebAssembly.ModuleImports {
   // Track the current suite/bench so key-addressed callbacks (sampleDone,
   // getBaseline) don't require every reporter to re-derive labels.
   let suiteName: string | null = null;
@@ -164,6 +172,17 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
       return 1;
     },
     change: (lb: number, point: number, hb: number, p: number) => reporter.change?.(lb, point, hb, p),
+    throughput: (lb: number, point: number, hb: number) => reporter.throughput?.(lb, point, hb),
+    suiteChart: (namePtr: number, nameLen: number, typePtr: number, typeLen: number) => {
+      const name = readString(getMem(), namePtr, nameLen);
+      const type = readString(getMem(), typePtr, typeLen);
+      reporter.suiteChart?.(name, type);
+    },
+    shouldSkip: (ptr: number, len: number) => {
+      if (!filter) return 0;
+      const name = readString(getMem(), ptr, len);
+      return filter(name) ? 0 : 1;
+    },
   };
 }
 
@@ -172,7 +191,7 @@ export function benchImports(getMem: () => WebAssembly.Memory, reporter: BenchRe
  * instantiate with WASI + `__asbench`, then `_start` executes the bench file's
  * top-level code, which drives the engine and fires the reporter as it goes.
  */
-export async function runBenchFile(wasmPath: string, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, extraImports: WebAssembly.Imports = {}): Promise<void> {
+export async function runBenchFile(wasmPath: string, reporter: BenchReporter = {}, tunes: TuneOverrides = {}, extraImports: WebAssembly.Imports = {}, filter: ((name: string) => boolean) | null = null): Promise<void> {
   const bytes = fs.readFileSync(wasmPath);
   filterWasiWarning();
   const { WASI } = await import("node:wasi");
@@ -190,7 +209,7 @@ export async function runBenchFile(wasmPath: string, reporter: BenchReporter = {
 
   const imports: WebAssembly.Imports = {
     wasi_snapshot_preview1: wrapNs("wasi_snapshot_preview1", wasi.wasiImport as unknown as WebAssembly.ModuleImports),
-    __asbench: benchImports(getMem, reporter, tunes, harness),
+    __asbench: benchImports(getMem, reporter, tunes, harness, filter),
   };
   for (const ns of Object.keys(extraImports)) {
     imports[ns] = ns === "__asbench" ? extraImports[ns] : wrapNs(ns, extraImports[ns]);

@@ -3,7 +3,7 @@
 // frames dispatch onto a BenchReporter, everything between frames passes
 // through (user console.log output).
 
-import type { BenchReporter } from "./as-bs.js";
+import type { BenchReporter } from "./host.js";
 
 const MAGIC = 0x48434241; // "ABCH" little-endian
 const HEADER_SIZE = 9;
@@ -24,6 +24,8 @@ const enum FrameType {
   SampleDone = 13,
   FaultyConfig = 14,
   FaultyBenchmark = 15,
+  Throughput = 16,
+  SuiteChart = 17,
 }
 
 const utf8 = new TextDecoder();
@@ -167,6 +169,17 @@ export class FrameParser {
       case FrameType.FaultyBenchmark:
         r.faultyBenchmark?.();
         break;
+      case FrameType.Throughput:
+        r.throughput?.(p.getFloat64(0, true), p.getFloat64(8, true), p.getFloat64(16, true));
+        break;
+      case FrameType.SuiteChart: {
+        const nameLen = p.getUint16(0, true);
+        const name = utf8.decode(new Uint8Array(p.buffer, p.byteOffset + 2, nameLen));
+        const typeLen = p.getUint16(2 + nameLen, true);
+        const type = utf8.decode(new Uint8Array(p.buffer, p.byteOffset + 4 + nameLen, typeLen));
+        r.suiteChart?.(name, type);
+        break;
+      }
       default:
         // unknown frame: skip silently (forward compatibility)
         break;

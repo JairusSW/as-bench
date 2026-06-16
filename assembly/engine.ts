@@ -297,8 +297,13 @@ export function endSuite(): void {
   flags &= ~(FLAG_IN_SUITE | FLAG_SUITE_BASELINE);
 }
 
-export function runBench(name: string, routine: () => void): void {
+export function runBench(name: string, routine: () => void, throughput: f64 = 0): void {
   host.benchStart(name);
+
+  if (host.shouldSkip(name)) {
+    host.benchEnd();
+    return;
+  }
 
   // resolve effective settings (host gets an override shot at each)
   cfgWarmupTime = host.tune(0, settings.warmupTime);
@@ -328,9 +333,9 @@ export function runBench(name: string, routine: () => void): void {
   // per iteration; compare deterministic runs only with deterministic runs.
   const deterministic = <i32>host.tune(9, 0) != 0;
 
-  cfgSampleSize = sampleSize;
+  // sampleSize==0 means auto — resolved after warmup from met
+  const sampleSizeOverride = sampleSize;
   cfgNumResamples = numResamples;
-  ensureBuffers(sampleSize, numResamples);
 
   // warmup — adaptive on top of criterion's doubling loop
   // (https://github.com/bheisler/criterion.rs/blob/ceade3b1d72c3ecef0896cbe0dee12f43a6ce240/src/routine.rs#L216):
@@ -395,6 +400,15 @@ export function runBench(name: string, routine: () => void): void {
   // average includes the cold first batches and biases the plan upward.
   const met = converged && stableIters > 0 ? stableElapsed / (stableIters as f64) : warmupElapsedTime / (totalWarmupIters as f64);
   host.warmupEnded(warmupElapsedTime, met, converged ? 1 : 0);
+
+  // resolve sample count: explicit override, or auto-fit to measurementTime.
+  // aim for each sample to represent at least 10 ms of work so individual
+  // samples are well above timer noise; clamp to [10, 500].
+  cfgSampleSize = sampleSizeOverride !== 0
+    ? sampleSizeOverride
+    : max(10, min(500, <i32>floor(cfgMeasurementTime / max(met, 10.0))));
+  ensureBuffers(cfgSampleSize, cfgNumResamples);
+
   const useFlatSampling = cfgSamplingMode == <i32>SamplingMode.Auto ? Sampling.chooseSamplingMode(met) : cfgSamplingMode == <i32>SamplingMode.Flat;
 
   if (useFlatSampling) {
@@ -487,9 +501,13 @@ export function runBench(name: string, routine: () => void): void {
   host.estimate(3, Stats.sorted.CI.LB(distMAD), MADPoint, Stats.sorted.CI.HB(distMAD));
 
   // regression: headline is the slope under linear sampling, the mean under flat
+  let resultLB: f64 = 0, resultPoint: f64 = 0, resultHB: f64 = 0;
   if (useFlatSampling) {
     flags &= ~FLAG_SLOPE;
-    host.result(Stats.sorted.CI.LB(distMean), meanPoint, Stats.sorted.CI.HB(distMean));
+    resultLB = Stats.sorted.CI.LB(distMean);
+    resultPoint = meanPoint;
+    resultHB = Stats.sorted.CI.HB(distMean);
+    host.result(resultLB, resultPoint, resultHB);
   } else {
     flags |= FLAG_SLOPE;
     // mItersF already filled for sampleDone above
@@ -506,10 +524,17 @@ export function runBench(name: string, routine: () => void): void {
     }
 
     distFit.sort();
-    const slopeLB = Stats.sorted.CI.LB(distFit);
-    const slopeHB = Stats.sorted.CI.HB(distFit);
-    host.estimate(4, slopeLB, slopePoint, slopeHB);
-    host.result(slopeLB, slopePoint, slopeHB);
+    resultLB = Stats.sorted.CI.LB(distFit);
+    resultHB = Stats.sorted.CI.HB(distFit);
+    resultPoint = slopePoint;
+    host.estimate(4, resultLB, resultPoint, resultHB);
+    host.result(resultLB, resultPoint, resultHB);
+  }
+
+  // throughput: elements-per-second CI (CI bounds invert — lower time = higher rate)
+  if (throughput > 0 && resultPoint > 0) {
+    // times are in ms; divide by 1000 for seconds
+    host.throughput(throughput / (resultHB / 1000), throughput / (resultPoint / 1000), throughput / (resultLB / 1000));
   }
 
   // report the saved-baseline delta before the suite block reuses the

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import chalk from "chalk";
-import { benchImports } from "../lib/build/as-bs.js";
+import { benchImports } from "../lib/build/host.js";
 import { buildBenchFile, findBenchFiles } from "./run.js";
 import { instrumentWasm, instrumentTimeWasm, instrumentAllocWasm } from "./instrument.js";
 import { loadConfig } from "./config.js";

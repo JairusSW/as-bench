@@ -4,7 +4,7 @@
 // the CLI's full renderer.
 
 import { JSON } from "json-as";
-import { bench, suite, blackbox, settings } from "./index";
+import { bench, suite, blackbox, settings, ChartOptions } from "./index";
 
 // Keep the playground loop snappy; bump these to criterion defaults for real
 // numbers (3000 / 5000 / 100000).
@@ -103,7 +103,7 @@ suite("sort 200 i32s", () => {
     quickSort(0, SIZE - 1);
     blackbox<i32>(work[0]);
   });
-});
+}).chart({ type: "bar" });
 
 // --- host nondeterminism: Date.now goes through wasi clock_time_get ------------
 // Under --deterministic the recorded timestamp (and the shim's tempbuf memory
@@ -171,7 +171,7 @@ suite("alloc", () => {
   bench("string += x64", () => {
     blackbox<i32>(stringBuildRef(blackbox<i32>(64)));
   });
-});
+}).chart({ type: "histogram", scale: "log2" });
 
 // --- json-as: real-world serialization ------------------------------------------
 // json-as compiles @json classes into specialized (de)serializers — a real
@@ -215,4 +215,4 @@ suite("json-as", () => {
   bench("parse Player (no alloc)", () => {
     blackbox<Player>(JSON.parse<Player>(blackbox<string>(playerJson), player));
   });
-});
+}).chart({ type: "bar" });

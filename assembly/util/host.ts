@@ -75,6 +75,15 @@ namespace imports {
   // @ts-ignore: decorator
   @external("__asbench", "suiteEnd")
   export declare function suiteEnd(): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "shouldSkip")
+  export declare function shouldSkip(ptr: usize, len: i32): i32;
+  // @ts-ignore: decorator
+  @external("__asbench", "throughput")
+  export declare function throughput(lb: f64, point: f64, hb: f64): void;
+  // @ts-ignore: decorator
+  @external("__asbench", "suiteChart")
+  export declare function suiteChart(namePtr: usize, nameLen: i32, typePtr: usize, typeLen: i32): void;
 }
 
 /** High-resolution clock in milliseconds (engine fallback when not on WASI). */
@@ -241,4 +250,25 @@ export function suiteEnd(): void {
     return;
   }
   imports.suiteEnd();
+}
+
+export function shouldSkip(name: string): bool {
+  if (isDefined(AS_BENCH_WIPC)) return false;
+  return imports.shouldSkip(changetype<usize>(name), name.length) != 0;
+}
+
+export function throughput(lb: f64, point: f64, hb: f64): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.throughput(lb, point, hb);
+    return;
+  }
+  imports.throughput(lb, point, hb);
+}
+
+export function suiteChart(name: string, chartType: string): void {
+  if (isDefined(AS_BENCH_WIPC)) {
+    wipc.suiteChart(name, chartType);
+    return;
+  }
+  imports.suiteChart(changetype<usize>(name), name.length, changetype<usize>(chartType), chartType.length);
 }

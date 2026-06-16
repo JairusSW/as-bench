@@ -29,6 +29,8 @@ export const enum FrameType {
   SampleDone = 13,
   FaultyConfig = 14,
   FaultyBenchmark = 15,
+  Throughput = 16,
+  SuiteChart = 17,
 }
 
 const MAGIC: u32 = 0x48434241; // "ABCH" little-endian
@@ -185,5 +187,26 @@ export function faultyConfig(linear: i32, actualMs: f64, recommendedSamples: f64
 
 export function faultyBenchmark(): void {
   begin(FrameType.FaultyBenchmark, 0);
+  end();
+}
+
+export function throughput(lb: f64, point: f64, hb: f64): void {
+  begin(FrameType.Throughput, 24);
+  putF64(lb);
+  putF64(point);
+  putF64(hb);
+  end();
+}
+
+export function suiteChart(name: string, chartType: string): void {
+  const nameUtf8 = String.UTF8.encode(name);
+  const typeUtf8 = String.UTF8.encode(chartType);
+  begin(FrameType.SuiteChart, 4 + nameUtf8.byteLength + typeUtf8.byteLength);
+  frameView.setUint16(framePos, <u16>nameUtf8.byteLength, true);
+  framePos += 2;
+  putBytes(nameUtf8);
+  frameView.setUint16(framePos, <u16>typeUtf8.byteLength, true);
+  framePos += 2;
+  putBytes(typeUtf8);
   end();
 }

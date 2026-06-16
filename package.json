@@ -87,6 +87,8 @@
     "play": "npm run playground",
     "pg": "npm run playground",
     "typecheck": "tsc -p cli --noEmit && tsc -p tsconfig.lib.json --noEmit && tsc -p transform --noEmit",
+    "test": "bun test",
+    "test:ci": "bun run build && bun test",
     "format": "prettier -w .",
     "lint": "eslint . --no-warn-ignored",
     "lint:fix": "eslint . --fix --no-warn-ignored",

@@ -44,8 +44,10 @@ export interface BenchReporter {
     sampleDone?(key: string, iters: Float64Array, times: Float64Array): void;
     getBaseline?(key: string, sampleCount: number): BaselineSample | undefined;
     change?(lb: number, point: number, hb: number, pValue: number): void;
+    throughput?(lb: number, point: number, hb: number): void;
+    suiteChart?(name: string, type: string): void;
 }
-export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides, harness?: DeterministicHarness | null): WebAssembly.ModuleImports;
-export declare function runBenchFile(wasmPath: string, reporter?: BenchReporter, tunes?: TuneOverrides, extraImports?: WebAssembly.Imports): Promise<void>;
+export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides, harness?: DeterministicHarness | null, filter?: ((name: string) => boolean) | null): WebAssembly.ModuleImports;
+export declare function runBenchFile(wasmPath: string, reporter?: BenchReporter, tunes?: TuneOverrides, extraImports?: WebAssembly.Imports, filter?: ((name: string) => boolean) | null): Promise<void>;
 export declare function defaultImports(): WebAssembly.Imports;
 export declare function instantiate(imports?: WebAssembly.Imports): Promise<WebAssembly.Instance>;
