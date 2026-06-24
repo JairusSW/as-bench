@@ -14,6 +14,10 @@ const CLI = path.join(ROOT, "bin", "index.js");
 const EXAMPLE = "assembly/__benches__/example.ts";
 // Fast settings: 100ms warmup, 200ms measure, 10 samples, 1000 resamples
 const FAST = ["--warmup", "100", "--measure", "200", "--samples", "10", "--resamples", "1000"];
+// Each `asb run`/`build` spawns node and recompiles the bench with asc; tests
+// (and hooks) that do two compile+run cycles exceed bun's 5s default on slower
+// CI runners. Give compile-heavy cases room. Also set via the test:ci script.
+const COMPILE_TIMEOUT = 30000;
 
 function run(...args: string[]) {
   const result = spawnSync(["node", CLI, ...args], { cwd: ROOT });
@@ -39,7 +43,7 @@ beforeAll(() => {
   if (r.exitCode !== 0) {
     throw new Error(`pre-build failed:\n${r.stderr}`);
   }
-});
+}, COMPILE_TIMEOUT);
 
 describe("version / help", () => {
   test("version prints a semver string", () => {
@@ -167,7 +171,7 @@ describe("run", () => {
       const baselineFile = path.join(ROOT, ".as-bench/baselines", `${baselineId}.json`);
       if (fs.existsSync(baselineFile)) fs.unlinkSync(baselineFile);
     }
-  });
+  }, COMPILE_TIMEOUT);
 });
 
 describe("init", () => {
@@ -260,7 +264,7 @@ describe("compare", () => {
     // Save two baselines to compare
     run("run", EXAMPLE, ...FAST, "--save-baseline", idA);
     run("run", EXAMPLE, ...FAST, "--save-baseline", idB);
-  });
+  }, COMPILE_TIMEOUT);
 
   test("compare two baselines", () => {
     const { exitCode, stdout } = run("compare", idA, idB);

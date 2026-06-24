@@ -18,8 +18,6 @@ jobs:
 
       - name: TypeScript Type Check
         run: bun run typecheck
-        continue-on-error: true
 
       - name: Lint
         run: bun run lint
-        continue-on-error: true
