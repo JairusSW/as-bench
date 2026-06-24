@@ -86,7 +86,7 @@ export interface BenchReporter {
 // node:wasi prints an ExperimentalWarning on first import; not actionable for
 // bench users, so filter that one warning while letting others through.
 let wasiWarningFiltered = false;
-function filterWasiWarning(): void {
+export function filterWasiWarning(): void {
   if (wasiWarningFiltered) return;
   wasiWarningFiltered = true;
   const original = process.emitWarning.bind(process);

@@ -28,6 +28,25 @@ export interface RunFlags {
   json: boolean;
 }
 
+const RUN_VALUE_FLAGS = new Set([
+  "--warmup",
+  "--warmup-tolerance",
+  "--warmup-min",
+  "--measure",
+  "--samples",
+  "--resamples",
+  "--sampling",
+  "--confidence",
+  "--save-baseline",
+  "--baseline",
+  "--runtime",
+  "--config",
+  "--mode",
+  "--filter",
+]);
+
+const RUN_BOOLEAN_FLAGS = new Set(["--deterministic", "--verbose", "-V", "--json"]);
+
 /** Match a bench name against a single glob-like pattern (case-insensitive). */
 function matchGlob(pattern: string, name: string): boolean {
   if (!pattern.includes("*")) return name.toLowerCase().includes(pattern.toLowerCase());
@@ -64,20 +83,27 @@ export function parseRunFlags(args: string[]): { flags: RunFlags; selectors: str
   let mode: string | undefined;
   const filters: string[] = [];
   let json = false;
-  const num = (name: string, v: string | undefined): number => {
+  // bounds mirror the config validator (config.ts) so CLI flags can't accept
+  // values the config file rejects.
+  const num = (name: string, v: string | undefined, min: number, opts: { max?: number; integer?: boolean; exclusive?: boolean } = {}): number => {
     const n = Number(v);
     if (v === undefined || !Number.isFinite(n)) throw new Error(`${name} expects a number, got "${v}"`);
+    const belowMin = opts.exclusive ? n <= min : n < min;
+    if (belowMin || (opts.max !== undefined && n >= opts.max)) {
+      throw new Error(`${name} must be a number ${opts.max !== undefined ? `in (${min}, ${opts.max})` : `>= ${min}`}, got ${n}`);
+    }
+    if (opts.integer && !Number.isInteger(n)) throw new Error(`${name} must be a whole number, got ${n}`);
     return n;
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--warmup") tunes.warmupTime = num(a, args[++i]);
-    else if (a === "--warmup-tolerance") tunes.warmupTolerance = num(a, args[++i]);
-    else if (a === "--warmup-min") tunes.warmupMinTime = num(a, args[++i]);
-    else if (a === "--measure") tunes.measurementTime = num(a, args[++i]);
-    else if (a === "--samples") tunes.sampleSize = num(a, args[++i]);
-    else if (a === "--resamples") tunes.numResamples = num(a, args[++i]);
-    else if (a === "--confidence") tunes.confidenceLevel = num(a, args[++i]);
+    if (a === "--warmup") tunes.warmupTime = num(a, args[++i], 0);
+    else if (a === "--warmup-tolerance") tunes.warmupTolerance = num(a, args[++i], 0);
+    else if (a === "--warmup-min") tunes.warmupMinTime = num(a, args[++i], 0);
+    else if (a === "--measure") tunes.measurementTime = num(a, args[++i], 1);
+    else if (a === "--samples") tunes.sampleSize = num(a, args[++i], 10, { integer: true });
+    else if (a === "--resamples") tunes.numResamples = num(a, args[++i], 1, { integer: true });
+    else if (a === "--confidence") tunes.confidenceLevel = num(a, args[++i], 0, { max: 1, exclusive: true });
     else if (a === "--sampling") {
       const mode = args[++i];
       const idx = ["auto", "linear", "flat"].indexOf(mode ?? "");
@@ -125,6 +151,15 @@ export async function findBenchFiles(selectors: string[], inputGlobs: string[]):
   return [...new Set(files)].filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")).sort();
 }
 
+export function benchFileKey(file: string): string {
+  return path.relative(process.cwd(), path.resolve(file)).split(path.sep).join("/");
+}
+
+function safeArtifactStem(file: string): string {
+  const key = benchFileKey(file).replace(/\.ts$/, "");
+  return key.replace(/[^A-Za-z0-9_.-]+/g, "__").replace(/^_+|_+$/g, "") || path.basename(file, ".ts");
+}
+
 function resolveWasiShimConfig(): string {
   let resolved: string;
   try {
@@ -140,7 +175,7 @@ function resolveWasiShimConfig(): string {
 
 export async function buildBenchFile(file: string, cfg: ResolvedConfig, extraArgs: string[] = [], outSuffix = ""): Promise<string> {
   fs.mkdirSync(cfg.outDir, { recursive: true });
-  const outWasm = path.join(cfg.outDir, path.basename(file).replace(/\.ts$/, `${outSuffix}.wasm`));
+  const outWasm = path.join(cfg.outDir, `${safeArtifactStem(file)}${outSuffix}.wasm`);
 
   const asc = await import("assemblyscript/dist/asc.js");
   const argv = [file, "--transform", path.join(PKG_ROOT, "transform/lib/index.js"), "--config", resolveWasiShimConfig(), "--outFile", outWasm];
@@ -181,14 +216,8 @@ function fmtTimeUnit(ms: number): { value: string; unit: string } {
   return { value: (ns / 1e9).toFixed(3), unit: "s" };
 }
 
-function formatTimeCells(lb: number, point: number, hb: number): { point: string; ci: string } {
-  const { value: pv, unit } = fmtTimeUnit(point);
-  const { value: lv } = fmtTimeUnit(lb);
-  const { value: hv } = fmtTimeUnit(hb);
-  return { point: `${pv} ${unit}`, ci: `[${lv}, ${hv}]` };
-}
-
 function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
@@ -763,7 +792,6 @@ export class Renderer implements BenchReporter {
     const show = (parts[2] ?? "1") !== "0";
 
     const fastest = Math.min(...results.map((r) => r.point));
-    const slowest = Math.max(...results.map((r) => r.point));
     const scaler = makeScaler(scale, results);
 
     if (show && type === "histogram") {
@@ -873,6 +901,7 @@ export class JsonReporter implements BenchReporter {
 
   private readonly significanceLevel: number;
   private readonly noiseThreshold: number;
+  filter: ((name: string) => boolean) | null = null;
 
   constructor(render: RenderConfig = {}) {
     this.significanceLevel = render.significanceLevel ?? 0.05;
@@ -895,6 +924,10 @@ export class JsonReporter implements BenchReporter {
   }
 
   benchStart(name: string): void {
+    if (this.filter !== null && !this.filter(name)) {
+      this.current = null;
+      return;
+    }
     if (this.suiteName !== null && this.suiteBaseline === null) this.suiteBaseline = name;
     const key = this.suiteName !== null ? `${this.suiteName}/${name}` : name;
     this.current = { file: this.file, runtime: this.runtime, suite: this.suiteName, name, key, result: null, throughput: null, delta: null, outliers: { lowSevere: 0, lowMild: 0, highMild: 0, highSevere: 0 }, warnings: [] };
@@ -1054,7 +1087,7 @@ export async function executeRun(args: string[]): Promise<void> {
   if (anyExternal && tunes.deterministic === 1) {
     throw new Error("--deterministic requires the node host (record/replay wraps imports in-process)");
   }
-  if (anyExternal && flags.baseline) {
+  if (anyExternal && flags.baseline && !flags.json) {
     console.log(chalk.yellow(`warning: --baseline comparison needs the node host (request/reply); only node runs compare, external runs can still --save-baseline`));
   }
 
@@ -1092,12 +1125,14 @@ export async function executeRun(args: string[]): Promise<void> {
 
       // with multiple runtimes, baseline keys carry the runtime label so runs
       // under different runtimes don't collide
-      const fileKey = (key: string) => `${path.basename(file)}::${multi ? `${rt.label}::` : ""}${key}`;
+      const sourceKey = benchFileKey(file);
+      const fileKey = (key: string) => `${sourceKey}::${multi ? `${rt.label}::` : ""}${key}`;
 
       // Use a shared JsonReporter when --json, otherwise a fresh Renderer per iteration.
       const reporter: Renderer | JsonReporter = jsonReporter ?? new Renderer(verbose, cfg.render);
       if (jsonReporter) {
         jsonReporter.setContext(file, rt.label);
+        jsonReporter.filter = filter;
       } else {
         (reporter as Renderer).filter = filter;
       }
@@ -1123,7 +1158,7 @@ export async function executeRun(args: string[]): Promise<void> {
       }
       if (multi) {
         reporter.resultSink = (key, point) => {
-          const benchKey = `${path.basename(file)}::${key}`;
+          const benchKey = `${sourceKey}::${key}`;
           let byRuntime = comparison.get(benchKey);
           if (!byRuntime) comparison.set(benchKey, (byRuntime = new Map()));
           byRuntime.set(rt.label, point);
@@ -1138,7 +1173,7 @@ export async function executeRun(args: string[]): Promise<void> {
     }
   }
 
-  if (multi && !flags.buildOnly && comparison.size > 0) {
+  if (multi && !flags.buildOnly && comparison.size > 0 && !flags.json) {
     console.log(chalk.bold("\nruntime comparison") + chalk.dim(" (point estimates, fastest = 1.00×)"));
     const labelWidth = Math.max(...runtimes.map((rt) => rt.label.length));
     for (const [bench, byRuntime] of comparison) {
@@ -1171,6 +1206,8 @@ export async function executeRun(args: string[]): Promise<void> {
 }
 
 export async function executeBuild(args: string[]): Promise<void> {
+  const unsupported = findUnsupportedBuildFlag(args);
+  if (unsupported) throw new Error(`build does not support ${unsupported}; use execution-only flags with "asb run"`);
   const { flags, selectors } = parseRunFlags(args);
   flags.buildOnly = true;
   const cfg = loadConfig(flags.configPath, flags.mode);
@@ -1188,4 +1225,42 @@ export async function executeBuild(args: string[]): Promise<void> {
     if (anyNode) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg)}`));
     if (anyExternal) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc")}`));
   }
+}
+
+function findUnsupportedBuildFlag(args: string[]): string | null {
+  const allowedValue = new Set(["--config", "--mode", "--runtime"]);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (allowedValue.has(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("--runtime=") || a.startsWith("--config=") || a.startsWith("--mode=")) continue;
+    if (RUN_BOOLEAN_FLAGS.has(a) || RUN_VALUE_FLAGS.has(a)) return a;
+    if (a.startsWith("-")) return null; // parseRunFlags will produce the precise unknown-flag error.
+  }
+  return null;
+}
+
+export function stripRunSelectors(args: string[], selectors: string[]): string[] {
+  const selectorSet = new Set(selectors);
+  const kept: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (RUN_VALUE_FLAGS.has(a)) {
+      kept.push(a);
+      if (i + 1 < args.length) kept.push(args[++i]);
+      continue;
+    }
+    if (RUN_BOOLEAN_FLAGS.has(a)) {
+      kept.push(a);
+      continue;
+    }
+    if (a.startsWith("-")) {
+      kept.push(a);
+      continue;
+    }
+    if (!selectorSet.has(a)) kept.push(a);
+  }
+  return kept;
 }

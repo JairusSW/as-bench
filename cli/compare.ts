@@ -9,14 +9,26 @@ interface BaselineFile {
   benches: Record<string, { sampleSize: number; iters: number[]; times: number[] }>;
 }
 
-export function parseCompareFlags(args: string[]): { flags: { configPath?: string; significanceLevel: number; noiseThreshold: number }; ids: string[] } {
+export function parseCompareFlags(args: string[]): { flags: { configPath?: string; mode?: string; significanceLevel?: number; noiseThreshold?: number }; ids: string[] } {
   const ids: string[] = [];
-  const flags = { configPath: undefined as string | undefined, significanceLevel: 0.05, noiseThreshold: 0.01 };
+  const flags: { configPath?: string; mode?: string; significanceLevel?: number; noiseThreshold?: number } = {};
+  const numArg = (raw: string | undefined, name: string): number => {
+    const n = Number(raw);
+    if (raw === undefined || !Number.isFinite(n) || n <= 0 || n >= 1) throw new Error(`${name} expects a number in (0, 1)`);
+    return n;
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--config") {
       flags.configPath = args[++i];
       if (!flags.configPath || flags.configPath.startsWith("-")) throw new Error("--config expects a path");
+    } else if (a === "--mode") {
+      flags.mode = args[++i];
+      if (!flags.mode || flags.mode.startsWith("-")) throw new Error("--mode expects a mode name");
+    } else if (a === "--significance") {
+      flags.significanceLevel = numArg(args[++i], "--significance");
+    } else if (a === "--noise") {
+      flags.noiseThreshold = numArg(args[++i], "--noise");
     } else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else ids.push(a);
   }
@@ -69,7 +81,7 @@ function welchTest(a: number[], b: number[]): { pValue: number; delta: number; l
 
 export async function executeCompare(args: string[]): Promise<void> {
   const { flags, ids } = parseCompareFlags(args);
-  const cfg = loadConfig(flags.configPath);
+  const cfg = loadConfig(flags.configPath, flags.mode);
   const [idA, idB] = ids;
   const blA = loadBaseline(cfg.baselineDir, idA);
   const blB = loadBaseline(cfg.baselineDir, idB);

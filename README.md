@@ -13,6 +13,7 @@ npm install --save-dev as-bench
 
 ```sh
 npx asb init          # scaffold as-bench.config.json + example bench
+npx asb doctor        # validate config, dependencies, and runtime setup
 npx asb run           # build + run all benches
 npx asb run --mode quick  # faster settings while iterating
 ```
@@ -62,8 +63,8 @@ Bench files execute at module start — `bench()` drives the engine immediately 
 | `warmupTime` | `3000` | Warmup time cap in ms (adaptive exit may be earlier). |
 | `warmupMinTime` | `100` | Minimum warmup time before stability is judged. |
 | `warmupTolerance` | `0.02` | Relative met drift considered stable; `0` = fixed-time warmup. |
-| `measurementTime` | `5000` | Target measurement window in ms. |
-| `sampleSize` | `100` | Samples per bench. |
+| `measurementTime` | `3000` | Target measurement window in ms. |
+| `sampleSize` | `0` | Samples per bench; `0` auto-sizes from warmup to ~10 ms/sample (clamped to [10, 500]). |
 | `numResamples` | `100000` | Bootstrap resamples for CIs. |
 | `samplingMode` | `SamplingMode.Auto` | `Auto` \| `Linear` \| `Flat`. |
 | `confidenceLevel` | `0.95` | CI confidence level. |
@@ -74,7 +75,7 @@ Bench files execute at module start — `bench()` drives the engine immediately 
 asb <command> [files...] [options]
 ```
 
-All commands accept `--config <path>` and `--mode <name>` (see Config).
+`run`, `build`, `profile`, `watch`, `compare`, `doctor`, and `clean` accept `--config <path>` and `--mode <name>` (see Config).
 
 ### `asb run`
 
@@ -132,15 +133,18 @@ asb build assembly/__benches__/my.ts
 asb build --runtime wasmtime      # also emit the pure-WASI WIPC build
 ```
 
+`build` accepts build-selection flags only.
+
 ### `asb profile`
 
 Per-function work profile. Builds a debug+instrumented wasm, runs each bench once (or N times), and renders tables.
 
 ```sh
-asb profile                       # --heaviest=instr (default)
-asb profile --heaviest=instr      # rank by cost-weighted instruction count (exact, deterministic)
-asb profile --heaviest=time       # rank by wall-clock self time (overhead-corrected, node only)
-asb profile --heaviest=alloc      # rank by bytes allocated from the runtime allocator (exact)
+asb profile                       # --instr (default)
+asb profile --instr               # rank by cost-weighted instruction count (exact, deterministic)
+asb profile --time                # rank by wall-clock self time (overhead-corrected, node only)
+asb profile --alloc               # rank by bytes allocated from the runtime allocator (exact)
+asb profile --heap                # alias for --alloc
 
 asb profile --top 20              # rows per bench (default 10)
 asb profile --all                 # include engine/runtime-internal rows
@@ -148,17 +152,19 @@ asb profile --iters 20            # (time/alloc) iterations per bench
 asb profile --min-instrs 0        # (time) wrap all functions, including trivial ones
 ```
 
-#### `--heaviest=instr`
+The legacy `--heaviest=instr|time|alloc` forms are still accepted.
+
+#### `--instr`
 
 Injects per-function call + instruction counters (region granularity: function entry, loop bodies, if-arms). Counts are exact and fully deterministic — identical totals across runs and build flags. Output columns: `% | weighted instrs | raw instrs | calls | wt/call | name`. Weights: ALU/const = 1, int mul 3, load 3/store 2, float 2, call 5/indirect 8, div/sqrt 12–15, `memory.grow` 100.
 
-#### `--heaviest=time`
+#### `--time`
 
-Outlines each function into a `<name>$tprof_inner` + timing wrapper. Self-time = own duration minus direct wrapped callees; inclusive time is outermost-frame-gated (recursion-safe). Overhead (~2 clock calls per call) is measured per bench and subtracted. Trust self times ≥ ~1µs; below that `--heaviest=instr` is exact. Node host only.
+Outlines each function into a `<name>$tprof_inner` + timing wrapper. Self-time = own duration minus direct wrapped callees; inclusive time is outermost-frame-gated (recursion-safe). Overhead (~2 clock calls per call) is measured per bench and subtracted. Trust self times ≥ ~1µs; below that `--instr` is exact. Node host only.
 
-#### `--heaviest=alloc`
+#### `--alloc` (alias `--heap`)
 
-Same move-body wrapper as `=time` but reads a monotone byte counter instead of a clock — exact and deterministic (no calibration). Counting point: the deepest allocator layer surviving `-O` inlining. Managed, unmanaged, and realloc moves are counted exactly once. GC frees don't subtract (allocation pressure, not live/peak). Summary line shows managed/unmanaged split, realloc count, and linear-memory page growth.
+Same move-body wrapper as `--time` but reads a monotone byte counter instead of a clock — exact and deterministic (no calibration). Counting point: the deepest allocator layer surviving `-O` inlining. Managed, unmanaged, and realloc moves are counted exactly once. GC frees don't subtract (allocation pressure, not live/peak). Summary line shows managed/unmanaged split, realloc count, and linear-memory page growth.
 
 ### `asb watch`
 
@@ -178,6 +184,7 @@ Compare two saved baselines without re-running — useful for async CI workflows
 
 ```sh
 asb compare main dev              # per-bench delta between baselines 'main' and 'dev'
+asb compare main dev --mode quick # use that mode's baselineDir/render thresholds
 ```
 
 Shows delta %, p-value (Welch's t-test), and a faster/slower/no-change verdict for each bench that appears in both baselines.
@@ -188,8 +195,35 @@ Scaffold a starter config and example bench.
 
 ```sh
 asb init                          # creates as-bench.config.json + assembly/__benches__/example.ts
+asb init my-bench-project         # scaffold into a target directory
+asb init --yes --dir bench        # as-test-style non-interactive form
+asb init --install                # run npm install after scaffolding
 asb init --force                  # overwrite existing files
 ```
+
+`init` is non-interactive by default; `--yes` / `-y` is accepted for script parity with `as-test`. It creates or updates `package.json` with `bench` scripts and the required dev dependencies.
+
+### `asb doctor`
+
+Validate the local benchmark setup.
+
+```sh
+asb doctor                        # config, deps, input globs, runtime commands
+asb doctor --mode wasmtime        # validate a runtime mode
+```
+
+`doctor` exits non-zero on errors and reports warnings for missing optional pieces such as unmatched input globs or unavailable external runtimes.
+
+### `asb clean`
+
+Remove generated outputs.
+
+```sh
+asb clean                         # remove build and chart outputs
+asb clean --baselines             # also remove saved baselines
+```
+
+Saved baselines are preserved by default because they are often committed as regression fixtures.
 
 ## Configuration
 
@@ -206,8 +240,8 @@ asb init --force                  # overwrite existing files
   "deterministic": false,
   "settings": {
     "warmupTime": 3000,
-    "measurementTime": 5000,
-    "sampleSize": 100,
+    "measurementTime": 3000,
+    "sampleSize": 0,
     "numResamples": 100000
   },
   "render": {

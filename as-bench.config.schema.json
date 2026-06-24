@@ -31,14 +31,14 @@
         "measurementTime": {
           "type": "number",
           "minimum": 1,
-          "default": 5000,
+          "default": 3000,
           "description": "Target measurement time in milliseconds across all samples of a bench."
         },
         "sampleSize": {
           "type": "number",
           "minimum": 10,
           "default": 100,
-          "description": "Number of timed samples collected per bench."
+          "description": "Number of timed samples collected per bench. Omit to auto-size from warmup (~10 ms/sample, clamped to 10-500)."
         },
         "numResamples": {
           "type": "number",

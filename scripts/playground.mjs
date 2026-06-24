@@ -2,6 +2,7 @@
 // the CLI's full criterion-style renderer — same output as `asb run`, including
 // suite deltas with verdicts and noise-threshold handling.
 // Pass --verbose to also print every estimate (mean/median/std dev/MAD/slope).
+import { performance } from "node:perf_hooks";
 import { runBenchFile } from "../lib/build/host.js";
 import { Renderer } from "../bin/run.js";
 

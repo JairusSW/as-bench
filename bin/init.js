@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import { DEFAULT_CONFIG_PATH } from "./config.js";
 const STARTER_CONFIG = `{
@@ -47,14 +48,33 @@ suite("fib", () => {
 });
 `;
 export async function executeInit(args) {
-  const force = args.includes("--force");
-  if (fs.existsSync(DEFAULT_CONFIG_PATH) && !force) {
-    console.log(chalk.yellow(`${DEFAULT_CONFIG_PATH} already exists (use --force to overwrite)`));
-  } else {
-    fs.writeFileSync(DEFAULT_CONFIG_PATH, STARTER_CONFIG);
-    console.log(`created ${chalk.bold(DEFAULT_CONFIG_PATH)}`);
+  let force = false;
+  let install = false;
+  let dir = ".";
+  let positionalDir;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--force") force = true;
+    else if (arg === "--install") install = true;
+    else if (arg === "--yes" || arg === "-y") {
+      // as-bench init is already non-interactive; accept the as-test-style flag.
+    } else if (arg === "--dir") {
+      dir = args[++i];
+      if (!dir || dir.startsWith("-")) throw new Error("--dir expects a path");
+    } else if (arg.startsWith("-")) throw new Error(`unknown flag: ${arg}`);
+    else if (positionalDir === undefined) positionalDir = arg;
+    else throw new Error(`unknown argument: ${arg}`);
   }
-  const benchDir = path.join("assembly", "__benches__");
+  if (positionalDir !== undefined) dir = positionalDir;
+  fs.mkdirSync(dir, { recursive: true });
+  const configPath = path.join(dir, DEFAULT_CONFIG_PATH);
+  if (fs.existsSync(configPath) && !force) {
+    console.log(chalk.yellow(`${configPath} already exists (use --force to overwrite)`));
+  } else {
+    fs.writeFileSync(configPath, STARTER_CONFIG);
+    console.log(`created ${chalk.bold(configPath)}`);
+  }
+  const benchDir = path.join(dir, "assembly", "__benches__");
   const benchFile = path.join(benchDir, "example.ts");
   if (fs.existsSync(benchFile) && !force) {
     console.log(chalk.yellow(`${benchFile} already exists (use --force to overwrite)`));
@@ -63,5 +83,41 @@ export async function executeInit(args) {
     fs.writeFileSync(benchFile, STARTER_BENCH);
     console.log(`created ${chalk.bold(benchFile)}`);
   }
-  console.log(`\nrun ${chalk.bold("asb run")} to benchmark (or ${chalk.bold("asb run --mode quick")} while iterating)`);
+  updatePackageJson(dir);
+  if (install) {
+    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const result = spawnSync(npm, ["install"], { cwd: dir, stdio: "inherit" });
+    if (result.status !== 0) throw new Error(`npm install failed with exit code ${result.status ?? "unknown"}`);
+  }
+  const prefix = dir === "." ? "" : `cd ${dir} && `;
+  const installHint = install ? "" : `\nrun ${chalk.bold(`${prefix}npm install`)} to install dependencies`;
+  console.log(`${installHint}\nrun ${chalk.bold(`${prefix}asb run`)} to benchmark (or ${chalk.bold(`${prefix}asb run --mode quick`)} while iterating)`);
+}
+function updatePackageJson(dir) {
+  const file = path.join(dir, "package.json");
+  const existed = fs.existsSync(file);
+  const fallbackName =
+    path
+      .basename(path.resolve(dir))
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, "-") || "as-bench-project";
+  let pkg = {
+    name: fallbackName,
+    version: "0.1.0",
+    type: "module",
+  };
+  if (existed) {
+    pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+  }
+  const scripts = { ...(pkg.scripts ?? {}) };
+  scripts.bench ?? (scripts.bench = "asb run");
+  scripts["bench:quick"] ?? (scripts["bench:quick"] = "asb run --mode quick");
+  pkg.scripts = scripts;
+  const devDeps = { ...(pkg.devDependencies ?? {}) };
+  devDeps["as-bench"] ?? (devDeps["as-bench"] = "^0.1.0");
+  devDeps.assemblyscript ?? (devDeps.assemblyscript = "^0.28.17");
+  devDeps["@assemblyscript/wasi-shim"] ?? (devDeps["@assemblyscript/wasi-shim"] = "^0.1.0");
+  pkg.devDependencies = devDeps;
+  fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+  console.log(`${existed ? "updated" : "created"} ${chalk.bold(file)}`);
 }

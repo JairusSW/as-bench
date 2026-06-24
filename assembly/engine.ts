@@ -143,7 +143,8 @@ namespace Stats {
     for (let i = 0; i < sample.length; ++i) {
       hits += sample[i] < t ? 1 : 0;
     }
-    return (min(hits, n - hits) / n) * 2;
+    // f64 division: i32/i32 truncates min(hits,n-hits)/n to 0, zeroing every p-value
+    return (<f64>min(hits, n - hits) / <f64>n) * 2.0;
   }
 
   // invariant: sample must be sorted
@@ -398,7 +399,10 @@ export function runBench(name: string, routine: () => void, throughput: f64 = 0)
   // mean execution time per iteration, the basis of the sampling plan. A
   // converged warmup estimates it from the stable tail only — the cumulative
   // average includes the cold first batches and biases the plan upward.
-  const met = converged && stableIters > 0 ? stableElapsed / (stableIters as f64) : warmupElapsedTime / (totalWarmupIters as f64);
+  const metRaw = converged && stableIters > 0 ? stableElapsed / (stableIters as f64) : warmupElapsedTime / (totalWarmupIters as f64);
+  // floor met so a sub-resolution/empty routine (met == 0) can't make the
+  // sampling plan divide by zero → Inf → u64::MAX iterations → hang.
+  const met = max(metRaw, 1e-6);
   host.warmupEnded(warmupElapsedTime, met, converged ? 1 : 0);
 
   // resolve sample count: explicit override, or auto-fit to measurementTime.

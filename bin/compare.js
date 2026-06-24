@@ -5,12 +5,24 @@ import { loadConfig } from "./config.js";
 import { formatTime } from "./run.js";
 export function parseCompareFlags(args) {
   const ids = [];
-  const flags = { configPath: undefined, significanceLevel: 0.05, noiseThreshold: 0.01 };
+  const flags = {};
+  const numArg = (raw, name) => {
+    const n = Number(raw);
+    if (raw === undefined || !Number.isFinite(n) || n <= 0 || n >= 1) throw new Error(`${name} expects a number in (0, 1)`);
+    return n;
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--config") {
       flags.configPath = args[++i];
       if (!flags.configPath || flags.configPath.startsWith("-")) throw new Error("--config expects a path");
+    } else if (a === "--mode") {
+      flags.mode = args[++i];
+      if (!flags.mode || flags.mode.startsWith("-")) throw new Error("--mode expects a mode name");
+    } else if (a === "--significance") {
+      flags.significanceLevel = numArg(args[++i], "--significance");
+    } else if (a === "--noise") {
+      flags.noiseThreshold = numArg(args[++i], "--noise");
     } else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
     else ids.push(a);
   }
@@ -58,7 +70,7 @@ function welchTest(a, b) {
 }
 export async function executeCompare(args) {
   const { flags, ids } = parseCompareFlags(args);
-  const cfg = loadConfig(flags.configPath);
+  const cfg = loadConfig(flags.configPath, flags.mode);
   const [idA, idB] = ids;
   const blA = loadBaseline(cfg.baselineDir, idA);
   const blB = loadBaseline(cfg.baselineDir, idB);

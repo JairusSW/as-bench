@@ -47,6 +47,7 @@ export interface BenchReporter {
     throughput?(lb: number, point: number, hb: number): void;
     suiteChart?(name: string, type: string): void;
 }
+export declare function filterWasiWarning(): void;
 export declare function benchImports(getMem: () => WebAssembly.Memory, reporter?: BenchReporter, tunes?: TuneOverrides, harness?: DeterministicHarness | null, filter?: ((name: string) => boolean) | null): WebAssembly.ModuleImports;
 export declare function runBenchFile(wasmPath: string, reporter?: BenchReporter, tunes?: TuneOverrides, extraImports?: WebAssembly.Imports, filter?: ((name: string) => boolean) | null): Promise<void>;
 export declare function defaultImports(): WebAssembly.Imports;

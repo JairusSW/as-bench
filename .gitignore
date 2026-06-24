@@ -16,3 +16,6 @@ build/
 .as-bench/*
 !.as-bench/runners/
 !.as-bench/runners/**
+
+# nested scratch repo, not part of the package
+wasi-as/

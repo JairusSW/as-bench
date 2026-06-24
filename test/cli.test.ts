@@ -7,6 +7,7 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import { spawnSync } from "bun";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const CLI = path.join(ROOT, "bin", "index.js");
@@ -16,6 +17,15 @@ const FAST = ["--warmup", "100", "--measure", "200", "--samples", "10", "--resam
 
 function run(...args: string[]) {
   const result = spawnSync(["node", CLI, ...args], { cwd: ROOT });
+  return {
+    exitCode: result.exitCode ?? -1,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
+function runIn(cwd: string, ...args: string[]) {
+  const result = spawnSync(["node", CLI, ...args], { cwd });
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout.toString(),
@@ -54,6 +64,14 @@ describe("version / help", () => {
     expect(stdout).toContain("compare");
   });
 
+  test("subcommand --help prints usage", () => {
+    for (const cmd of ["run", "build", "profile", "watch", "compare", "init", "doctor", "clean"]) {
+      const { exitCode, stdout } = run(cmd, "--help");
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Usage");
+    }
+  });
+
   test("unknown command exits non-zero", () => {
     const { exitCode } = run("doesnotexist");
     expect(exitCode).not.toBe(0);
@@ -64,12 +82,18 @@ describe("build", () => {
   test("builds example bench", () => {
     const { exitCode } = run("build", EXAMPLE);
     expect(exitCode).toBe(0);
-    expect(fs.existsSync(path.join(ROOT, ".as-bench/build/example.wasm"))).toBeTrue();
+    expect(fs.existsSync(path.join(ROOT, ".as-bench/build/assembly____benches____example.wasm"))).toBeTrue();
   });
 
   test("exits non-zero on missing file", () => {
     const { exitCode } = run("build", "nonexistent.ts");
     expect(exitCode).not.toBe(0);
+  });
+
+  test("rejects run-only flags", () => {
+    const { exitCode, stderr } = run("build", EXAMPLE, "--json");
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("build does not support --json");
   });
 });
 
@@ -124,8 +148,9 @@ describe("run", () => {
     const { exitCode, stdout } = run("run", EXAMPLE, ...FAST, "--json", "--filter", "fib(15)");
     expect(exitCode).toBe(0);
     const parsed = JSON.parse(stdout) as { benches: { name: string; result: unknown }[] };
-    const withResults = parsed.benches.filter((b) => b.result !== null);
-    expect(withResults.every((b) => b.name.includes("fib(15)"))).toBeTrue();
+    expect(parsed.benches.length).toBeGreaterThan(0);
+    expect(parsed.benches.every((b) => b.name.includes("fib(15)"))).toBeTrue();
+    expect(parsed.benches.every((b) => b.result !== null)).toBeTrue();
   });
 
   test("--save-baseline and --baseline comparison", () => {
@@ -142,6 +167,69 @@ describe("run", () => {
       const baselineFile = path.join(ROOT, ".as-bench/baselines", `${baselineId}.json`);
       if (fs.existsSync(baselineFile)) fs.unlinkSync(baselineFile);
     }
+  });
+});
+
+describe("init", () => {
+  test("rejects unknown flags", () => {
+    const { exitCode, stderr } = run("init", "--bogus");
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("unknown flag: --bogus");
+  });
+
+  test("--dir scaffolds into a target directory", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "as-bench-init-"));
+    const target = path.join(tmp, "bench-project");
+    const { exitCode, stdout } = run("init", "--yes", "--dir", target);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("created");
+    expect(fs.existsSync(path.join(target, "as-bench.config.json"))).toBeTrue();
+    expect(fs.existsSync(path.join(target, "assembly/__benches__/example.ts"))).toBeTrue();
+    const pkg = JSON.parse(fs.readFileSync(path.join(target, "package.json"), "utf8")) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
+    expect(pkg.scripts.bench).toBe("asb run");
+    expect(pkg.devDependencies["as-bench"]).toBeDefined();
+    expect(pkg.devDependencies.assemblyscript).toBeDefined();
+    expect(pkg.devDependencies["@assemblyscript/wasi-shim"]).toBeDefined();
+  });
+});
+
+describe("doctor / clean", () => {
+  test("doctor validates this repo", () => {
+    const { exitCode, stdout } = run("doctor");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("as-bench doctor");
+    expect(stdout).toContain("Summary:");
+    expect(stdout).toContain("0 error");
+  });
+
+  test("clean removes generated outputs but preserves baselines by default", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "as-bench-clean-"));
+    fs.mkdirSync(path.join(tmp, ".as-bench/build"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, ".as-bench/charts"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, ".as-bench/baselines"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, ".as-bench/build/example.wasm"), "");
+    fs.writeFileSync(path.join(tmp, ".as-bench/charts/example.svg"), "");
+    fs.writeFileSync(path.join(tmp, ".as-bench/baselines/main.json"), "{}");
+
+    const { exitCode } = runIn(tmp, "clean");
+    expect(exitCode).toBe(0);
+    expect(fs.existsSync(path.join(tmp, ".as-bench/build"))).toBeFalse();
+    expect(fs.existsSync(path.join(tmp, ".as-bench/charts"))).toBeFalse();
+    expect(fs.existsSync(path.join(tmp, ".as-bench/baselines/main.json"))).toBeTrue();
+  });
+});
+
+describe("package exports", () => {
+  test("documented assembly subpath is exported", () => {
+    const result = spawnSync(["node", "-e", "console.log(import.meta.resolve('as-bench/assembly/index'))"], { cwd: ROOT });
+    expect(result.exitCode ?? -1).toBe(0);
+    expect(result.stdout.toString()).toContain("assembly/index.ts");
+  });
+
+  test("root export resolves to host library", () => {
+    const result = spawnSync(["node", "-e", "import('as-bench').then((m)=>console.log(typeof m.runBenchFile))"], { cwd: ROOT });
+    expect(result.exitCode ?? -1).toBe(0);
+    expect(result.stdout.toString()).toContain("function");
   });
 });
 

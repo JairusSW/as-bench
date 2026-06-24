@@ -1,6 +1,6 @@
 {
   "name": "as-bench",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "author": "Jairus Tanaka",
   "repository": {
     "type": "git",
@@ -13,16 +13,20 @@
     "asb": "./bin/index.js"
   },
   "exports": {
-    ".": "./index.ts",
-    "./lib": "./lib/build/as-bs.js",
+    ".": {
+      "types": "./lib/build/host.d.ts",
+      "default": "./lib/build/host.js"
+    },
+    "./assembly/index": "./assembly/index.ts",
+    "./assembly/*": "./assembly/*",
+    "./lib": "./lib/build/host.js",
     "./transform": "./transform/lib/index.js",
     "./package.json": "./package.json"
   },
-  "types": "assembly/index.ts",
+  "types": "lib/build/host.d.ts",
   "dependencies": {
     "chalk": "^5.6.2",
-    "glob": "^13.0.6",
-    "wipc-js": "^0.1.1"
+    "glob": "^13.0.6"
   },
   "devDependencies": {
     "@assemblyscript/wasi-shim": "^0.1.0",
@@ -49,7 +53,7 @@
     "assembly/types.ts",
     "assembly/util/**/*.ts",
     "assembly/tsconfig.json",
-    "lib/as-bs.ts",
+    "lib/*.ts",
     "lib/build/**/*.js",
     "lib/build/**/*.d.ts",
     "bin/**/*.js",

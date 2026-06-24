@@ -10,6 +10,8 @@ import { FrameParser } from "../lib/build/wipc.js";
 import { loadConfig, tunesFromSettings, toRuntimeEntries } from "./config.js";
 const require = createRequire(import.meta.url);
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const RUN_VALUE_FLAGS = new Set(["--warmup", "--warmup-tolerance", "--warmup-min", "--measure", "--samples", "--resamples", "--sampling", "--confidence", "--save-baseline", "--baseline", "--runtime", "--config", "--mode", "--filter"]);
+const RUN_BOOLEAN_FLAGS = new Set(["--deterministic", "--verbose", "-V", "--json"]);
 /** Match a bench name against a single glob-like pattern (case-insensitive). */
 function matchGlob(pattern, name) {
   if (!pattern.includes("*")) return name.toLowerCase().includes(pattern.toLowerCase());
@@ -37,20 +39,27 @@ export function parseRunFlags(args) {
   let mode;
   const filters = [];
   let json = false;
-  const num = (name, v) => {
+  // bounds mirror the config validator (config.ts) so CLI flags can't accept
+  // values the config file rejects.
+  const num = (name, v, min, opts = {}) => {
     const n = Number(v);
     if (v === undefined || !Number.isFinite(n)) throw new Error(`${name} expects a number, got "${v}"`);
+    const belowMin = opts.exclusive ? n <= min : n < min;
+    if (belowMin || (opts.max !== undefined && n >= opts.max)) {
+      throw new Error(`${name} must be a number ${opts.max !== undefined ? `in (${min}, ${opts.max})` : `>= ${min}`}, got ${n}`);
+    }
+    if (opts.integer && !Number.isInteger(n)) throw new Error(`${name} must be a whole number, got ${n}`);
     return n;
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--warmup") tunes.warmupTime = num(a, args[++i]);
-    else if (a === "--warmup-tolerance") tunes.warmupTolerance = num(a, args[++i]);
-    else if (a === "--warmup-min") tunes.warmupMinTime = num(a, args[++i]);
-    else if (a === "--measure") tunes.measurementTime = num(a, args[++i]);
-    else if (a === "--samples") tunes.sampleSize = num(a, args[++i]);
-    else if (a === "--resamples") tunes.numResamples = num(a, args[++i]);
-    else if (a === "--confidence") tunes.confidenceLevel = num(a, args[++i]);
+    if (a === "--warmup") tunes.warmupTime = num(a, args[++i], 0);
+    else if (a === "--warmup-tolerance") tunes.warmupTolerance = num(a, args[++i], 0);
+    else if (a === "--warmup-min") tunes.warmupMinTime = num(a, args[++i], 0);
+    else if (a === "--measure") tunes.measurementTime = num(a, args[++i], 1);
+    else if (a === "--samples") tunes.sampleSize = num(a, args[++i], 10, { integer: true });
+    else if (a === "--resamples") tunes.numResamples = num(a, args[++i], 1, { integer: true });
+    else if (a === "--confidence") tunes.confidenceLevel = num(a, args[++i], 0, { max: 1, exclusive: true });
     else if (a === "--sampling") {
       const mode = args[++i];
       const idx = ["auto", "linear", "flat"].indexOf(mode ?? "");
@@ -96,6 +105,13 @@ export async function findBenchFiles(selectors, inputGlobs) {
   }
   return [...new Set(files)].filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")).sort();
 }
+export function benchFileKey(file) {
+  return path.relative(process.cwd(), path.resolve(file)).split(path.sep).join("/");
+}
+function safeArtifactStem(file) {
+  const key = benchFileKey(file).replace(/\.ts$/, "");
+  return key.replace(/[^A-Za-z0-9_.-]+/g, "__").replace(/^_+|_+$/g, "") || path.basename(file, ".ts");
+}
 function resolveWasiShimConfig() {
   let resolved;
   try {
@@ -110,7 +126,7 @@ function resolveWasiShimConfig() {
 }
 export async function buildBenchFile(file, cfg, extraArgs = [], outSuffix = "") {
   fs.mkdirSync(cfg.outDir, { recursive: true });
-  const outWasm = path.join(cfg.outDir, path.basename(file).replace(/\.ts$/, `${outSuffix}.wasm`));
+  const outWasm = path.join(cfg.outDir, `${safeArtifactStem(file)}${outSuffix}.wasm`);
   const asc = await import("assemblyscript/dist/asc.js");
   const argv = [file, "--transform", path.join(PKG_ROOT, "transform/lib/index.js"), "--config", resolveWasiShimConfig(), "--outFile", outWasm];
   if (cfg.buildOptions.optimize) argv.push("--optimize");
@@ -145,13 +161,8 @@ function fmtTimeUnit(ms) {
   if (ns < 1e9) return { value: (ns / 1e6).toFixed(2), unit: "ms" };
   return { value: (ns / 1e9).toFixed(3), unit: "s" };
 }
-function formatTimeCells(lb, point, hb) {
-  const { value: pv, unit } = fmtTimeUnit(point);
-  const { value: lv } = fmtTimeUnit(lb);
-  const { value: hv } = fmtTimeUnit(hb);
-  return { point: `${pv} ${unit}`, ci: `[${lv}, ${hv}]` };
-}
 function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 /** Format a duration given in milliseconds with criterion-style units. */
@@ -596,7 +607,6 @@ export class Renderer {
     const scale = parts[1] ?? "linear";
     const show = (parts[2] ?? "1") !== "0";
     const fastest = Math.min(...results.map((r) => r.point));
-    const slowest = Math.max(...results.map((r) => r.point));
     const scaler = makeScaler(scale, results);
     if (show && type === "histogram") {
       // ASCII vertical histogram: columns grow upward, Y-axis labels on left
@@ -680,6 +690,7 @@ export class JsonReporter {
     this.baselineSource = null;
     this.sampleSink = null;
     this.resultSink = null;
+    this.filter = null;
     this.significanceLevel = render.significanceLevel ?? 0.05;
     this.noiseThreshold = render.noiseThreshold ?? 0.01;
   }
@@ -696,6 +707,10 @@ export class JsonReporter {
     this.suiteBaseline = null;
   }
   benchStart(name) {
+    if (this.filter !== null && !this.filter(name)) {
+      this.current = null;
+      return;
+    }
     if (this.suiteName !== null && this.suiteBaseline === null) this.suiteBaseline = name;
     const key = this.suiteName !== null ? `${this.suiteName}/${name}` : name;
     this.current = { file: this.file, runtime: this.runtime, suite: this.suiteName, name, key, result: null, throughput: null, delta: null, outliers: { lowSevere: 0, lowMild: 0, highMild: 0, highSevere: 0 }, warnings: [] };
@@ -833,7 +848,7 @@ export async function executeRun(args) {
   if (anyExternal && tunes.deterministic === 1) {
     throw new Error("--deterministic requires the node host (record/replay wraps imports in-process)");
   }
-  if (anyExternal && flags.baseline) {
+  if (anyExternal && flags.baseline && !flags.json) {
     console.log(chalk.yellow(`warning: --baseline comparison needs the node host (request/reply); only node runs compare, external runs can still --save-baseline`));
   }
   const loaded = anyNode && flags.baseline ? loadBaselineFile(cfg.baselineDir, flags.baseline) : null;
@@ -868,11 +883,13 @@ export async function executeRun(args) {
       if (!flags.json && multi) console.log(chalk.cyan(`\n[${rt.label}]`));
       // with multiple runtimes, baseline keys carry the runtime label so runs
       // under different runtimes don't collide
-      const fileKey = (key) => `${path.basename(file)}::${multi ? `${rt.label}::` : ""}${key}`;
+      const sourceKey = benchFileKey(file);
+      const fileKey = (key) => `${sourceKey}::${multi ? `${rt.label}::` : ""}${key}`;
       // Use a shared JsonReporter when --json, otherwise a fresh Renderer per iteration.
       const reporter = jsonReporter ?? new Renderer(verbose, cfg.render);
       if (jsonReporter) {
         jsonReporter.setContext(file, rt.label);
+        jsonReporter.filter = filter;
       } else {
         reporter.filter = filter;
       }
@@ -898,7 +915,7 @@ export async function executeRun(args) {
       }
       if (multi) {
         reporter.resultSink = (key, point) => {
-          const benchKey = `${path.basename(file)}::${key}`;
+          const benchKey = `${sourceKey}::${key}`;
           let byRuntime = comparison.get(benchKey);
           if (!byRuntime) comparison.set(benchKey, (byRuntime = new Map()));
           byRuntime.set(rt.label, point);
@@ -911,7 +928,7 @@ export async function executeRun(args) {
       }
     }
   }
-  if (multi && !flags.buildOnly && comparison.size > 0) {
+  if (multi && !flags.buildOnly && comparison.size > 0 && !flags.json) {
     console.log(chalk.bold("\nruntime comparison") + chalk.dim(" (point estimates, fastest = 1.00×)"));
     const labelWidth = Math.max(...runtimes.map((rt) => rt.label.length));
     for (const [bench, byRuntime] of comparison) {
@@ -940,6 +957,8 @@ export async function executeRun(args) {
   }
 }
 export async function executeBuild(args) {
+  const unsupported = findUnsupportedBuildFlag(args);
+  if (unsupported) throw new Error(`build does not support ${unsupported}; use execution-only flags with "asb run"`);
   const { flags, selectors } = parseRunFlags(args);
   flags.buildOnly = true;
   const cfg = loadConfig(flags.configPath, flags.mode);
@@ -957,4 +976,40 @@ export async function executeBuild(args) {
     if (anyNode) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg)}`));
     if (anyExternal) console.log(chalk.dim(`built ${await buildBenchFile(file, cfg, ["--use", "AS_BENCH_WIPC=1"], ".wipc")}`));
   }
+}
+function findUnsupportedBuildFlag(args) {
+  const allowedValue = new Set(["--config", "--mode", "--runtime"]);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (allowedValue.has(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("--runtime=") || a.startsWith("--config=") || a.startsWith("--mode=")) continue;
+    if (RUN_BOOLEAN_FLAGS.has(a) || RUN_VALUE_FLAGS.has(a)) return a;
+    if (a.startsWith("-")) return null; // parseRunFlags will produce the precise unknown-flag error.
+  }
+  return null;
+}
+export function stripRunSelectors(args, selectors) {
+  const selectorSet = new Set(selectors);
+  const kept = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (RUN_VALUE_FLAGS.has(a)) {
+      kept.push(a);
+      if (i + 1 < args.length) kept.push(args[++i]);
+      continue;
+    }
+    if (RUN_BOOLEAN_FLAGS.has(a)) {
+      kept.push(a);
+      continue;
+    }
+    if (a.startsWith("-")) {
+      kept.push(a);
+      continue;
+    }
+    if (!selectorSet.has(a)) kept.push(a);
+  }
+  return kept;
 }

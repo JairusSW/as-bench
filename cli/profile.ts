@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import chalk from "chalk";
-import { benchImports } from "../lib/build/host.js";
+import { benchImports, filterWasiWarning } from "../lib/build/host.js";
 import { buildBenchFile, findBenchFiles } from "./run.js";
 import { instrumentWasm, instrumentTimeWasm, instrumentAllocWasm, type ProfiledFunction } from "./instrument.js";
 import { loadConfig } from "./config.js";
@@ -53,7 +53,10 @@ export function parseProfileFlags(args: string[]): { flags: ProfileFlags; select
     } else if (a === "--mode") {
       flags.mode = args[++i];
       if (!flags.mode || flags.mode.startsWith("-")) throw new Error("--mode expects a mode name");
-    } else if (a.startsWith("--heaviest=")) {
+    } else if (a === "--instr") flags.heaviest = "instr";
+    else if (a === "--time") flags.heaviest = "time";
+    else if (a === "--alloc" || a === "--heap") flags.heaviest = "alloc";
+    else if (a.startsWith("--heaviest=")) {
       const mode = a.slice("--heaviest=".length);
       if (mode !== "instr" && mode !== "time" && mode !== "alloc") throw new Error(`--heaviest expects instr|time|alloc, got "${mode}"`);
       flags.heaviest = mode;
@@ -65,6 +68,7 @@ export function parseProfileFlags(args: string[]): { flags: ProfileFlags; select
 
 async function runProfiled(wasmPath: string, functions: ProfiledFunction[]): Promise<BenchProfile[]> {
   const bytes = fs.readFileSync(wasmPath);
+  filterWasiWarning();
   const { WASI } = await import("node:wasi");
   const wasi = new WASI({ version: "preview1", args: [wasmPath], env: {}, preopens: {} });
 
@@ -145,6 +149,7 @@ interface BenchTimeProfile {
 
 async function runTimeProfiled(wasmPath: string, functions: ProfiledFunction[], calibK: number, iters: number): Promise<BenchTimeProfile[]> {
   const bytes = fs.readFileSync(wasmPath);
+  filterWasiWarning();
   const { WASI } = await import("node:wasi");
   const wasi = new WASI({ version: "preview1", args: [wasmPath], env: {}, preopens: {} });
 
@@ -262,6 +267,7 @@ interface BenchAllocProfile {
 
 async function runAllocProfiled(wasmPath: string, functions: ProfiledFunction[], iters: number): Promise<BenchAllocProfile[]> {
   const bytes = fs.readFileSync(wasmPath);
+  filterWasiWarning();
   const { WASI } = await import("node:wasi");
   const wasi = new WASI({ version: "preview1", args: [wasmPath], env: {}, preopens: {} });
 
@@ -362,15 +368,17 @@ function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, a
     if (k.reallocs > 0n) parts.push(`${formatCount(k.reallocs)} ${k.reallocs === 1n ? "realloc" : "reallocs"} (${formatBytes(Number(k.reallocBytes))} requested)`);
     if (p.pagesGrown > 0) parts.push(`memory +${p.pagesGrown} pages (${formatBytes(p.pagesGrown * 65536)})`);
     console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatBytes(Number(total))} allocated${parts.length > 0 ? chalk.dim(" · " + parts.join(" · ")) : ""}`);
-    const shown = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
-    for (const row of shown.slice(0, top)) {
-      const pct = total > 0n ? Number((row.selfBytes * 10000n) / total) / 100 : 0;
+    const eligible = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
+    const shown = selectRows(eligible, (r) => pctBig(r.selfBytes, total), top, all);
+    let cum = 0;
+    for (const row of shown) {
+      const pct = pctBig(row.selfBytes, total);
+      cum += pct;
       const perCall = row.calls > 0n ? formatBytes(Number(row.selfBytes) / Number(row.calls)) : "-";
       const pages = row.selfPages > 0n ? chalk.dim(`  +${formatCount(row.selfPages)} pages`) : "";
       console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatBytes(Number(row.selfBytes)).padStart(11)} self  ${formatBytes(Number(row.inclBytes)).padStart(11)} incl  ${formatCount(row.allocs).padStart(9)} allocs  ${formatCount(row.calls).padStart(9)} calls  ${perCall.padStart(11)}/call  ${row.name}${pages}`);
     }
-    const hidden = p.rows.length - shown.length;
-    if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
+    printCoverage(shown.length, cum, p.rows.length - shown.length, all);
   }
   console.log(chalk.dim(`\n  allocation pressure (bytes claimed from the allocator: __new incl. 16 B object header, heap.alloc, realloc moves), not live/peak — GC frees don't subtract.`));
   console.log(chalk.dim(`  in-place realloc growth shows under reallocs (requested size), not in bytes claimed; page growth attributes to the live frame.`));
@@ -379,6 +387,29 @@ function renderAlloc(file: string, profiles: BenchAllocProfile[], top: number, a
 
 function formatCount(n: bigint): string {
   return n.toLocaleString("en-US");
+}
+
+// Default row selection: the rows that carry signal. Show those ≥ 1% of total
+// cost, capped at --top. Tiny/flat profiles collapse to a couple of rows; giant
+// ones shed their sub-1% tail without a hard coverage cutoff. --all shows
+// everything (internal rows included). Always keep at least the top row so a
+// section is never empty.
+function selectRows<T>(eligible: T[], pctOf: (r: T) => number, top: number, all: boolean): T[] {
+  if (all) return eligible;
+  const ranked = eligible.filter((r) => pctOf(r) >= 1).slice(0, top);
+  return ranked.length > 0 ? ranked : eligible.slice(0, 1);
+}
+
+function pctBig(part: bigint, total: bigint): number {
+  return total > 0n ? Number((part * 10000n) / total) / 100 : 0;
+}
+
+function printCoverage(shown: number, cumPct: number, hidden: number, all: boolean): void {
+  if (shown > 0) {
+    const verb = shown === 1 ? "row accounts" : "rows account";
+    console.log(chalk.dim(`  top ${shown} ${verb} for ${cumPct.toFixed(1)}% of total cost`));
+  }
+  if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} hidden rows, use --all to show)`));
 }
 
 function formatNs(ns: number): string {
@@ -412,15 +443,17 @@ function renderTime(file: string, profiles: BenchTimeProfile[], top: number, all
       .sort((a, b) => b.self - a.self);
     let total = 0;
     for (const r of rows) total += r.self;
-    const shown = rows.filter((r) => all || !isInternal(r.name));
+    const eligible = rows.filter((r) => all || !isInternal(r.name));
+    const shown = selectRows(eligible, (r) => (total > 0 ? (r.self / total) * 100 : 0), top, all);
     console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatNs(total)} self total` + chalk.dim(` (~${oTotal.toFixed(0)} ns/call instrumentation subtracted)`));
-    for (const row of shown.slice(0, top)) {
+    let cum = 0;
+    for (const row of shown) {
       const pct = total > 0 ? (row.self / total) * 100 : 0;
+      cum += pct;
       const perCall = row.calls > 0n ? formatNs(row.self / Number(row.calls)) : "-";
       console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatNs(row.self).padStart(10)} self  ${formatNs(row.incl).padStart(10)} incl  ${formatCount(row.calls).padStart(11)} calls  ${perCall.padStart(10)}/call  ${row.name}`);
     }
-    const hidden = rows.length - shown.length;
-    if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
+    printCoverage(shown.length, cum, rows.length - shown.length, all);
   }
   console.log(chalk.dim(`\n  self excludes wrapped callees; incl counts outermost frames only (recursion-safe).`));
   console.log(chalk.dim(`  trust self times ≥ ~1µs — below that, clock granularity dominates; --heaviest=instr is exact.`));
@@ -430,14 +463,16 @@ function render(file: string, profiles: BenchProfile[], top: number, all: boolea
   console.log(chalk.bold(`\nprofile: ${file}`) + chalk.dim(" (wasm instructions; counts exact, weights from a static cost table; 1 run per bench)"));
   for (const p of profiles) {
     console.log(`\n${chalk.bold(p.key.padEnd(24))} ${formatCount(p.totalCost)} weighted · ${formatCount(p.total)} instructions`);
-    const rows = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
-    for (const row of rows.slice(0, top)) {
-      const pct = p.totalCost > 0n ? Number((row.cost * 10000n) / p.totalCost) / 100 : 0;
+    const eligible = all ? p.rows : p.rows.filter((r) => !isInternal(r.name));
+    const shown = selectRows(eligible, (r) => pctBig(r.cost, p.totalCost), top, all);
+    let cum = 0;
+    for (const row of shown) {
+      const pct = pctBig(row.cost, p.totalCost);
+      cum += pct;
       const perCall = row.calls > 0n ? formatCount(row.cost / row.calls) : "-";
       console.log(`  ${pct.toFixed(1).padStart(5)}%  ${formatCount(row.cost).padStart(14)} wt  ${formatCount(row.instrs).padStart(14)} instrs  ${formatCount(row.calls).padStart(11)} calls  ${perCall.padStart(9)} wt/call  ${row.name}`);
     }
-    const hidden = p.rows.length - rows.length;
-    if (hidden > 0 && !all) console.log(chalk.dim(`  (+${hidden} internal rows — --all to show)`));
+    printCoverage(shown.length, cum, p.rows.length - shown.length, all);
   }
 }
 

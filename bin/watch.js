@@ -3,7 +3,7 @@ import path from "node:path";
 import chalk from "chalk";
 import { glob } from "glob";
 import { loadConfig } from "./config.js";
-import { parseRunFlags, executeRun } from "./run.js";
+import { parseRunFlags, executeRun, stripRunSelectors } from "./run.js";
 export async function executeWatch(args) {
   const { flags, selectors } = parseRunFlags(args);
   const cfg = loadConfig(flags.configPath, flags.mode);
@@ -36,7 +36,7 @@ export async function executeWatch(args) {
     const changedList = [...changed].map((f) => path.relative(process.cwd(), f)).join(", ");
     process.stderr.write(chalk.dim(`\n--- ${new Date().toLocaleTimeString()} — ${changedList} changed ---\n\n`));
     // Re-run with just the changed files as selectors (preserving all flags)
-    const changedArgs = [...changed].map((f) => path.relative(process.cwd(), f)).concat(args.filter((a) => !isSelector(a, patterns)));
+    const changedArgs = [...changed].map((f) => path.relative(process.cwd(), f)).concat(stripRunSelectors(args, selectors));
     try {
       await executeRun(changedArgs);
     } catch (err) {
@@ -70,10 +70,4 @@ export async function executeWatch(args) {
   }
   // Keep the process alive
   await new Promise(() => {});
-}
-/** Detect whether an arg is a positional file selector (not a flag) that overlaps with the input patterns. */
-function isSelector(arg, patterns) {
-  if (arg.startsWith("-")) return false;
-  // If it looks like a file or glob that's part of the watch set, treat it as a selector
-  return patterns.includes(arg) || fs.existsSync(arg);
 }
