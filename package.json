@@ -36,7 +36,7 @@
     "assemblyscript-prettier": "^3.0.4",
     "eslint": "^10.3.0",
     "json-as": "^1.5.0",
-    "prettier": "3.8.3",
+    "prettier": "3.8.4",
     "serve": "^14.2.6",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.2"
